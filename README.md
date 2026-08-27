@@ -18,22 +18,81 @@ O Portal InteliReg permanece consumidor dos dados produzidos por este serviço.
 
 ## Estado atual
 
-Bootstrap inicial do projeto.
+O projeto possui bootstrap Python, configuração mínima e ambiente Docker com PostgreSQL.
 
 Ainda não há:
 
 - integração com a ANVISA;
-- persistência em banco;
+- persistência de dados da aplicação;
+- migrations;
 - download de PDFs;
 - extração textual;
 - publicação para o Portal.
 
 ## Requisitos
 
-- Python 3.13+
-- uv
+Para execução local:
 
-## Instalação
+- Python 3.13;
+- uv.
+
+Para execução containerizada:
+
+- Docker;
+- Docker Compose.
+
+## Instalação local
 
 ```bash
 uv sync
+```
+
+## Execução local
+
+```bash
+uv run python -m bulario_service
+```
+
+## Testes locais
+
+```bash
+uv run pytest
+```
+
+## Docker
+
+Subir o ambiente:
+
+```bash
+docker compose up --build
+```
+
+O Compose cria somente os componentes atualmente necessários:
+
+- `app`: aplicação Python;
+- `db`: PostgreSQL.
+
+Executar os testes dentro do container:
+
+```bash
+docker compose run --rm app uv run pytest
+```
+
+Encerrar o ambiente:
+
+```bash
+docker compose down
+```
+
+Para também remover o volume local do PostgreSQL:
+
+```bash
+docker compose down -v
+```
+
+## Configuração
+
+As variáveis disponíveis neste estágio estão documentadas em `.env.example`.
+
+- `APP_ENV`: identifica o ambiente da aplicação;
+- `DATABASE_URL`: conexão PostgreSQL que será utilizada pela camada de persistência nos próximos incrementos.

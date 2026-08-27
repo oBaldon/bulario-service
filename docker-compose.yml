@@ -1,0 +1,29 @@
+services:
+  app:
+    build:
+      context: .
+    environment:
+      APP_ENV: local
+      DATABASE_URL: postgresql://bulario:bulario@db:5432/bulario
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: bulario
+      POSTGRES_USER: bulario
+      POSTGRES_PASSWORD: bulario
+    ports:
+      - "5432:5432"
+    volumes:
+      - bulario_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bulario -d bulario"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  bulario_postgres_data:
