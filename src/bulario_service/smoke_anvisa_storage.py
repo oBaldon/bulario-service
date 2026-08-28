@@ -16,13 +16,13 @@ from bulario_service.anvisa_session import (
     AnvisaBrowserSessionBootstrap,
 )
 from bulario_service.anvisa_transport_probe import DEFAULT_PROFILE_DIR
+from bulario_service.config import load_settings
 from bulario_service.document_storage import (
     DocumentStorageError,
     LocalDocumentStorage,
 )
 
 
-DEFAULT_STORAGE_ROOT = Path("storage")
 
 
 def print_request_trace(trace: RequestTrace) -> None:
@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--storage-root",
         type=Path,
-        default=DEFAULT_STORAGE_ROOT,
+        default=None,
     )
     parser.add_argument(
         "--headed",
@@ -91,11 +91,14 @@ def run_smoke(
     period_start: str,
     period_end: str,
     profile_dir: Path,
-    storage_root: Path,
+    storage_root: Path | None,
     headed: bool,
     page_size: int,
 ) -> int:
     try:
+        settings = load_settings()
+        effective_storage_root = storage_root or settings.storage_root
+
         print("Bootstrapping ANVISA session with Google Chrome...")
         bootstrap = AnvisaBrowserSessionBootstrap(
             profile_dir=profile_dir,
@@ -105,7 +108,7 @@ def run_smoke(
         print("Browser session bootstrap: OK")
         print("Browser has been closed. Starting httpx validation...")
 
-        storage = LocalDocumentStorage(storage_root)
+        storage = LocalDocumentStorage(effective_storage_root)
 
         with AnvisaAuthenticatedHttpClient(session_state) as authenticated:
             connector = AnvisaBularioConnector(

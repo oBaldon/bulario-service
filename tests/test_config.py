@@ -15,11 +15,13 @@ def test_load_settings_uses_local_environment_by_default(
 ) -> None:
     monkeypatch.delenv("APP_ENV", raising=False)
     monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("BULARIO_STORAGE_ROOT", raising=False)
 
     settings = load_settings(env_file=tmp_path / ".env")
 
     assert settings.app_env == "local"
     assert settings.database_url is None
+    assert settings.storage_root == Path("storage")
 
 
 def test_load_settings_reads_environment(
@@ -153,3 +155,20 @@ def test_normalize_database_url_preserves_psycopg_scheme() -> None:
     database_url = "postgresql+psycopg://user:password@db:5432/intelireg"
 
     assert normalize_database_url(database_url) == database_url
+
+
+
+def test_load_settings_reads_storage_root(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv(
+        "BULARIO_STORAGE_ROOT",
+        "../intelireg-data/bulas",
+    )
+
+    settings = load_settings(env_file=tmp_path / ".env")
+
+    assert settings.storage_root == Path(
+        "../intelireg-data/bulas"
+    )

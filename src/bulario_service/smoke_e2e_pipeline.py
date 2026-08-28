@@ -30,7 +30,6 @@ from bulario_service.publication_contract import BulaPublicationContractError
 from bulario_service.publication_publisher import BulaPublicationError
 
 
-DEFAULT_STORAGE_ROOT = Path("storage")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--storage-root",
         type=Path,
-        default=DEFAULT_STORAGE_ROOT,
+        default=None,
     )
     parser.add_argument(
         "--headed",
@@ -65,12 +64,14 @@ def run_smoke(
     period_start: str,
     period_end: str,
     profile_dir: Path,
-    storage_root: Path,
+    storage_root: Path | None,
     headed: bool,
 ) -> int:
     engine = None
     try:
-        engine = create_database_engine(load_settings())
+        settings = load_settings()
+        engine = create_database_engine(settings)
+        effective_storage_root = storage_root or settings.storage_root
 
         bootstrap = AnvisaBrowserSessionBootstrap(
             profile_dir=profile_dir,
@@ -80,7 +81,7 @@ def run_smoke(
         print("Browser session bootstrap: OK")
         print("Browser closed. Starting controlled E2E...")
 
-        storage = LocalDocumentStorage(storage_root)
+        storage = LocalDocumentStorage(effective_storage_root)
         extractor = PdfTextExtractor()
 
         with AnvisaAuthenticatedHttpClient(session_state) as authenticated:

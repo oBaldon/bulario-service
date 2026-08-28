@@ -10,6 +10,7 @@ DEFAULT_ENV_FILE = Path(".env")
 class Settings:
     app_env: str
     database_url: str | None
+    storage_root: Path = Path("storage")
 
 
 def normalize_database_url(database_url: str | None) -> str | None:
@@ -72,6 +73,9 @@ def load_settings(
     return Settings(
         app_env=os.getenv("APP_ENV", "local"),
         database_url=normalize_database_url(os.getenv("DATABASE_URL")),
+        storage_root=Path(
+            os.getenv("BULARIO_STORAGE_ROOT", "storage")
+        ),
     )
 
 

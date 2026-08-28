@@ -750,6 +750,80 @@ producer_portal_handoff_ready=true
 
 Esse resultado comprova a prontidão do contrato **do lado do produtor**. Ele não substitui os testes consumidores do repositório Portal. Para o encerramento integral da Sprint 01 ainda devem ser executados, no código atual do Portal, os testes do contrato consumidor e do serving privado de PDF aplicáveis.
 
+## Acervo físico compartilhado
+
+O contrato de publicação usa **storage keys relativas**. O caminho físico do acervo é configuração de infraestrutura e não pertence ao contrato entre produtor e Portal.
+
+Para desenvolvimento local com os repositórios em `~/Projetos`, a convenção recomendada é manter um diretório irmão e neutro:
+
+```text
+~/Projetos/
+├── bulario-service/
+├── intelireg/
+└── intelireg-data/
+    └── bulas/
+```
+
+No `bulario-service`:
+
+```env
+BULARIO_STORAGE_ROOT=../intelireg-data/bulas
+```
+
+Quando o produtor roda via Docker Compose, o host path é informado separadamente:
+
+```env
+BULAS_ARCHIVE_HOST_PATH=../intelireg-data/bulas
+```
+
+e montado no container em `/data/bulas`, com:
+
+```text
+BULARIO_STORAGE_ROOT=/data/bulas
+```
+
+Isso mantém duas camadas distintas:
+
+```text
+storage_key
+= identidade lógica persistida no contrato
+
+BULARIO_STORAGE_ROOT
+= detalhe físico de deployment
+```
+
+O Portal receberá, em patch próprio, o mesmo acervo físico como **read-only**, sem precisar conhecer `BULARIO_STORAGE_ROOT`.
+
+### Cutover dos PDFs já ingeridos
+
+Os PDFs produzidos antes desta configuração permanecem no storage legado `./storage`. Para migrá-los ao acervo neutro sem alterar storage keys nem banco, use primeiro o dry-run:
+
+```bash
+uv run python -m bulario_service.smoke_storage_cutover
+```
+
+Ele usa `bulario.document_artifacts` como inventário e informa `pending_copy=N`, sem escrever.
+
+Depois efetive:
+
+```bash
+uv run python -m bulario_service.smoke_storage_cutover --write
+```
+
+A rotina:
+
+- valida que source e target são diretórios distintos;
+- valida `%PDF-`;
+- valida SHA-256 do arquivo de origem;
+- copia atomicamente;
+- valida novamente SHA-256 no destino;
+- reutiliza arquivos de destino quando já possuem o mesmo hash;
+- recusa sobrescrever arquivo divergente;
+- não altera registros do banco;
+- não remove o acervo legado.
+
+Após o cutover, os smokes que manipulam PDFs usam `BULARIO_STORAGE_ROOT` por padrão. `--storage-root` permanece disponível apenas como override explícito.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.

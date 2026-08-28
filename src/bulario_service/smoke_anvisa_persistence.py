@@ -26,7 +26,6 @@ from bulario_service.operational_persistence import (
 )
 
 
-DEFAULT_STORAGE_ROOT = Path("storage")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--storage-root",
         type=Path,
-        default=DEFAULT_STORAGE_ROOT,
+        default=None,
     )
     parser.add_argument(
         "--headed",
@@ -62,7 +61,7 @@ def run_smoke(
     period_start: str,
     period_end: str,
     profile_dir: Path,
-    storage_root: Path,
+    storage_root: Path | None,
     headed: bool,
     page_size: int,
 ) -> int:
@@ -70,6 +69,7 @@ def run_smoke(
     try:
         settings = load_settings()
         engine = create_database_engine(settings)
+        effective_storage_root = storage_root or settings.storage_root
 
         bootstrap = AnvisaBrowserSessionBootstrap(
             profile_dir=profile_dir,
@@ -78,7 +78,7 @@ def run_smoke(
         session_state = bootstrap.bootstrap()
         print("Browser session bootstrap: OK")
 
-        storage = LocalDocumentStorage(storage_root)
+        storage = LocalDocumentStorage(effective_storage_root)
 
         with AnvisaAuthenticatedHttpClient(session_state) as authenticated:
             connector = AnvisaBularioConnector(

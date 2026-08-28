@@ -21,19 +21,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--storage-root",
         type=Path,
-        default=Path("storage"),
+        default=None,
     )
     return parser
 
 
-def run_smoke(*, storage_root: Path) -> int:
+def run_smoke(*, storage_root: Path | None) -> int:
     engine = None
     try:
-        engine = create_database_engine(load_settings())
+        settings = load_settings()
+        engine = create_database_engine(settings)
+        effective_storage_root = storage_root or settings.storage_root
         with Session(engine) as session:
             report = validate_latest_ready_handoff(
                 session,
-                storage_root=storage_root,
+                storage_root=effective_storage_root,
             )
 
         print(

@@ -22,7 +22,6 @@ from bulario_service.models import (
 )
 
 
-DEFAULT_STORAGE_ROOT = Path("storage")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -35,17 +34,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--storage-root",
         type=Path,
-        default=DEFAULT_STORAGE_ROOT,
+        default=None,
     )
     return parser
 
 
-def run_smoke(*, storage_root: Path) -> int:
+def run_smoke(*, storage_root: Path | None) -> int:
     engine = None
     try:
         settings = load_settings()
         engine = create_database_engine(settings)
-        storage = LocalDocumentStorage(storage_root)
+        effective_storage_root = storage_root or settings.storage_root
+        storage = LocalDocumentStorage(effective_storage_root)
         extractor = PdfTextExtractor()
 
         with Session(engine) as session:
