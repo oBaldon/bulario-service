@@ -546,6 +546,71 @@ public_bulas_written=0
 
 O resultado desse smoke é a fonte de verdade para implementar o adapter SQL do publisher no próximo incremento. Isso evita inventar aliases, tipos ou regras de unicidade que não estejam no contrato consumidor real.
 
+## Publisher transacional para `public.bulas`
+
+Após a reconciliação do schema real, o produtor publica somente os campos efetivamente presentes e necessários no contrato consumidor:
+
+- `medicamento`;
+- `empresa`;
+- `numero_registro`;
+- `num_expediente`;
+- `cnpj`;
+- `data_publicacao`;
+- `bula_paciente`;
+- `bula_profissional`;
+- `source_record_id`;
+- `source_url`;
+- `source_fingerprint`;
+- `ingested_at`;
+- `ingestion_status`;
+- `bula_paciente_sha256`;
+- `bula_profissional_sha256`;
+- `created_at`;
+- `updated_at`.
+
+Os campos analíticos e estruturados legados permanecem nulos/default quando não são produzidos pelo pipeline atual.
+
+Como `public.bulas` não possui UNIQUE em `source_record_id`, o publisher obtém `pg_advisory_xact_lock(hashtextextended(source_record_id, 0))` antes de consultar/inserir. Isso serializa publicações concorrentes da mesma versão lógica sem alterar o schema consumidor.
+
+Política:
+
+```text
+candidate inválido/incompleto
+→ nenhuma escrita
+
+source_record_id inexistente
+→ INSERT ready
+
+source_record_id existente e conteúdo público idêntico
+→ unchanged / no-op
+
+source_record_id existente com fingerprint, hash, storage key ou metadado divergente
+→ conflito; nenhuma sobrescrita
+
+mais de uma linha existente para o mesmo source_record_id
+→ conflito operacional
+```
+
+Smoke seguro por padrão:
+
+```bash
+uv run python -m bulario_service.smoke_portal_publisher
+```
+
+Sem `--write`, a operação é executada e revertida com rollback:
+
+```text
+public_bulas_committed=0
+```
+
+Após validar o dry-run real, a escrita é habilitada explicitamente:
+
+```bash
+uv run python -m bulario_service.smoke_portal_publisher --write
+```
+
+Uma segunda execução com `--write` deve retornar `action=unchanged`, comprovando idempotência do contrato público.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
