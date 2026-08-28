@@ -671,6 +671,85 @@ Uma reexecução idêntica deve produzir `publish_action=unchanged`, mantendo no
 
 Carga completa e incremental em volume ainda não são iniciadas por este comando.
 
+## Hardening de conflitos e rollback
+
+Após a validação E2E, o serviço possui um smoke de hardening que usa um documento operacional vigente já publicado para comprovar as barreiras de imutabilidade e idempotência sem depender de nova chamada à ANVISA.
+
+Execute:
+
+```bash
+uv run python -m bulario_service.smoke_hardening
+```
+
+O smoke procura a versão operacional vigente mais recente que possua exatamente uma linha pública `ready` e valida:
+
+```text
+rerun público idêntico
+→ unchanged
+
+mesmo source_record_id + source_fingerprint divergente
+→ bloqueado
+
+mesmo source_record_id + hash de PDF divergente
+→ bloqueado
+
+mesmo PDF + mesma normalization_version + texto divergente
+→ bloqueado
+
+mesmo source_document_id + metadado material divergente
+→ bloqueado
+```
+
+Cada tentativa de conflito é seguida por rollback. O smoke não cria nova versão, não altera PDF/texto persistido e não publica linha adicional em `public.bulas`.
+
+A saída termina com:
+
+```text
+hardening_committed_mutations=0
+```
+
+Os testes automatizados também cobrem:
+
+- falha de extração antes do publisher, com `item/run=failed`;
+- falha controlada após tentativa de publicação e antes do commit final, confirmando rollback;
+- nova `source_document_id` como nova versão lógica válida;
+- mutação material sob a mesma `source_document_id` como conflito.
+
+Arquivos PDF eventualmente já presentes no storage continuam reutilizáveis e não representam publicação parcial.
+
+## Handoff do produtor para o Portal
+
+O fechamento do lado produtor inclui uma validação explícita da linha `ready` mais recente publicada em `public.bulas`.
+
+Execute:
+
+```bash
+uv run python -m bulario_service.smoke_portal_handoff
+```
+
+O smoke valida, sem alterar dados:
+
+```text
+public.bulas ready
+→ source_record_id parseável
+→ versão operacional correspondente
+→ source_fingerprint público = operacional
+→ patient/professional presentes
+→ storage keys públicos = operacionais
+→ storage keys relativos e seguros
+→ arquivos PDF existem no storage compartilhado
+→ arquivos iniciam com %PDF-
+→ SHA-256 em disco = SHA-256 operacional = SHA-256 público
+```
+
+Em sucesso, termina com:
+
+```text
+producer_portal_handoff_ready=true
+```
+
+Esse resultado comprova a prontidão do contrato **do lado do produtor**. Ele não substitui os testes consumidores do repositório Portal. Para o encerramento integral da Sprint 01 ainda devem ser executados, no código atual do Portal, os testes do contrato consumidor e do serving privado de PDF aplicáveis.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.

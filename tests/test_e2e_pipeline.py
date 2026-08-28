@@ -27,6 +27,7 @@ class FakeSession:
         self.items = {}
         self.commits = 0
         self.rollbacks = 0
+        self.pending_publication = False
 
     def add(self, entity):
         if isinstance(entity, IngestionRun):
@@ -48,6 +49,7 @@ class FakeSession:
 
     def rollback(self):
         self.rollbacks += 1
+        self.pending_publication = False
 
     def get(self, model, entity_id):
         if model is IngestionRun:
@@ -150,6 +152,11 @@ class FakeExtractor:
             text_sha256="c" * 64,
             character_count=len(text),
         )
+
+
+class FailingExtractor(FakeExtractor):
+    def extract(self, **kwargs):
+        raise RuntimeError("controlled extraction failure")
 
 
 def install_persistence_stubs(monkeypatch, *, publish_action="inserted"):
@@ -343,3 +350,65 @@ def test_missing_required_pdf_token_marks_item_failed(monkeypatch) -> None:
     assert session.runs[1].status == "failed"
     assert session.items[1].status == "failed"
     assert calls["publish"] == 0
+
+
+
+def test_extraction_failure_marks_item_failed_without_publication(
+    monkeypatch,
+) -> None:
+    session = FakeSession()
+    calls, publish = install_persistence_stubs(monkeypatch)
+
+    with pytest.raises(
+        E2EPipelineError,
+        match="controlled extraction failure",
+    ):
+        run_single_product_pipeline(
+            session,
+            connector=FakeConnector(),
+            downloader=FakeDownloader(),
+            storage=FakeStorage(),
+            extractor=FailingExtractor(),
+            period_start="2026-08-28T00:00:00.000Z",
+            period_end="2026-08-29T00:00:00.000Z",
+            publish=publish,
+        )
+
+    assert session.runs[1].status == "failed"
+    assert session.items[1].status == "failed"
+    assert session.items[1].error_code == "RuntimeError"
+    assert calls["publish"] == 0
+    assert session.rollbacks == 1
+
+
+def test_failure_after_publication_attempt_rolls_back_and_marks_failed(
+    monkeypatch,
+) -> None:
+    session = FakeSession()
+    calls, _ = install_persistence_stubs(monkeypatch)
+
+    def publish_then_fail(session, *, candidate):
+        calls["publish"] += 1
+        session.pending_publication = True
+        raise RuntimeError("controlled post-publication failure")
+
+    with pytest.raises(
+        E2EPipelineError,
+        match="controlled post-publication failure",
+    ):
+        run_single_product_pipeline(
+            session,
+            connector=FakeConnector(),
+            downloader=FakeDownloader(),
+            storage=FakeStorage(),
+            extractor=FakeExtractor(),
+            period_start="2026-08-28T00:00:00.000Z",
+            period_end="2026-08-29T00:00:00.000Z",
+            publish=publish_then_fail,
+        )
+
+    assert calls["publish"] == 1
+    assert session.pending_publication is False
+    assert session.rollbacks == 1
+    assert session.runs[1].status == "failed"
+    assert session.items[1].status == "failed"

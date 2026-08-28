@@ -269,3 +269,42 @@ def test_current_version_demotes_previous_current_versions() -> None:
         isinstance(call.args[0], Update)
         for call in session.execute.call_args_list
     )
+
+
+
+def test_new_source_document_id_creates_new_logical_version() -> None:
+    product_model = BularioProduct(
+        id=10,
+        source_product_id=1174609,
+        product_name="Produto teste",
+    )
+    new_version = BulaVersion(
+        source_document_id=99999999,
+        expedient="222",
+        registration_number="123456789",
+        publication_date="29/08/2026",
+        status="Publicado",
+        patient_token=None,
+        professional_token=None,
+        current=True,
+        raw_payload={},
+    )
+
+    session = Mock()
+    session.scalar.side_effect = [product_model, None]
+
+    result = persist_operational_version(
+        session,
+        product=make_product(),
+        version=new_version,
+        stored_documents=[],
+    )
+
+    added_versions = [
+        call.args[0]
+        for call in session.add.call_args_list
+        if isinstance(call.args[0], BularioDocumentVersion)
+    ]
+    assert len(added_versions) == 1
+    assert added_versions[0].source_document_id == 99999999
+    assert result.version is added_versions[0]
