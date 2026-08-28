@@ -18,12 +18,14 @@ O Portal InteliReg permanece consumidor dos dados produzidos por este serviço.
 
 ## Estado atual
 
-O projeto possui bootstrap Python, configuração mínima, ambiente Docker e persistência operacional inicial no PostgreSQL compartilhado com o InteliReg.
+O projeto possui bootstrap Python, configuração mínima, ambiente Docker, persistência operacional inicial no PostgreSQL compartilhado com o InteliReg e operações de aplicação para controlar execuções e itens de ingestão.
 
 O schema `bulario` contém somente as estruturas operacionais necessárias neste incremento:
 
 - `bulario.ingestion_runs`;
 - `bulario.ingestion_items`.
+
+A aplicação já consegue iniciar/finalizar uma execução, registrar itens descobertos e validar as transições operacionais `discovered → fetching → downloaded → normalized → ready`, com falha terminal rastreável por `error_code` e `error_message`.
 
 Ainda não há:
 
