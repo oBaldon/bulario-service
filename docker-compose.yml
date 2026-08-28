@@ -6,7 +6,7 @@ services:
       context: .
     environment:
       APP_ENV: local
-      DATABASE_URL: ${BULARIO_DOCKER_DATABASE_URL:-postgresql://intelireg:intelireg_local@db:5432/intelireg}
+      DATABASE_URL: ${BULARIO_DOCKER_DATABASE_URL:-postgresql+psycopg://intelireg:intelireg_local@db:5432/intelireg}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

@@ -18,13 +18,16 @@ O Portal InteliReg permanece consumidor dos dados produzidos por este serviço.
 
 ## Estado atual
 
-O projeto possui bootstrap Python, configuração mínima e ambiente Docker preparado para usar o PostgreSQL do InteliReg.
+O projeto possui bootstrap Python, configuração mínima, ambiente Docker e persistência operacional inicial no PostgreSQL compartilhado com o InteliReg.
+
+O schema `bulario` contém somente as estruturas operacionais necessárias neste incremento:
+
+- `bulario.ingestion_runs`;
+- `bulario.ingestion_items`.
 
 Ainda não há:
 
 - integração com a ANVISA;
-- persistência de dados da aplicação;
-- migrations;
 - download de PDFs;
 - extração textual;
 - publicação para o Portal.
@@ -46,6 +49,8 @@ Para execução containerizada:
 ```bash
 uv sync
 ```
+
+O `uv sync` também atualiza `uv.lock` quando as dependências declaradas no `pyproject.toml` mudam.
 
 ## Execução local
 
@@ -104,11 +109,43 @@ A separação será lógica:
 
 A definição das tabelas e permissões será feita no incremento de persistência/migrations.
 
+
+## Migrations
+
+As migrations pertencem ao `bulario-service` e são executadas com Alembic. Elas atuam no mesmo database PostgreSQL do InteliReg, mas mantêm os dados operacionais do produtor no schema `bulario`.
+
+Execução local:
+
+```bash
+uv run alembic upgrade head
+```
+
+Execução via Docker:
+
+```bash
+docker compose run --rm app uv run alembic upgrade head
+```
+
+Verificar a revisão atual:
+
+```bash
+uv run alembic current
+```
+
+O primeiro incremento cria apenas:
+
+- `bulario.ingestion_runs`: identifica uma execução de ingestão e seu estado;
+- `bulario.ingestion_items`: registra os itens descobertos/processados dentro de uma execução, incluindo payload operacional, fingerprint e eventual erro.
+
+`public.bulas` não é alterada por estas migrations. A publicação nesse contrato será implementada em uma etapa posterior da sprint.
+
 ## Configuração
 
 As variáveis disponíveis neste estágio estão documentadas em `.env.example`.
 
 - `APP_ENV`: identifica o ambiente da aplicação;
-- `DATABASE_URL`: conexão utilizada ao executar o serviço diretamente no host;
+- `DATABASE_URL`: conexão SQLAlchemy/psycopg utilizada ao executar o serviço diretamente no host;
 - `BULARIO_DOCKER_DATABASE_URL`: conexão utilizada pelo container do `bulario-service`;
+
+URLs legadas iniciadas por `postgresql://` são normalizadas internamente para `postgresql+psycopg://`, garantindo o uso do driver psycopg 3 configurado pelo projeto.
 - `INTELIREG_DOCKER_NETWORK`: nome da rede Docker criada pelo Compose do InteliReg.
