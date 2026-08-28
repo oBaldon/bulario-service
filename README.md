@@ -108,6 +108,26 @@ docker compose down
 
 O comando acima encerra somente os containers pertencentes ao `bulario-service`; o PostgreSQL do InteliReg permanece sob responsabilidade do Compose do Portal.
 
+## Smoke test da fonte ANVISA
+
+Existe um smoke test manual e controlado para validar se o ambiente de execução consegue acessar diretamente a interface do Bulário observada no frontend da ANVISA.
+
+Ele solicita apenas um registro por padrão e consulta o detalhe do primeiro produto:
+
+```bash
+uv run python -m bulario_service.smoke_anvisa
+```
+
+Também é possível informar explicitamente o período:
+
+```bash
+uv run python -m bulario_service.smoke_anvisa \
+  --period-start 2026-08-26T00:00:00.000Z \
+  --period-end 2026-08-29T00:00:00.000Z
+```
+
+Esse comando não grava no banco e não faz download de PDFs. Ele existe apenas para validar listagem + detalhe em ambiente real. Falhas como HTTP 403/Cloudflare devem ser tratadas como bloqueio da fonte para HTTP automatizado e não como motivo para contornar mecanismos de proteção.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
