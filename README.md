@@ -394,6 +394,32 @@ uv run python -m bulario_service.smoke_anvisa_persistence \
 
 O comando é idempotente para a mesma versão e os mesmos hashes. Ele ainda não publica em `public.bulas`.
 
+## Extração e normalização textual
+
+O PDF oficial permanece a evidência documental primária. O texto é um artefato derivado para etapas posteriores de comparação, indexação e RAG.
+
+A extração usa `pdftotext` (Poppler). O Dockerfile instala explicitamente `poppler-utils`; no host local, `pdftotext` deve estar disponível no `PATH`.
+
+Cada artefato textual mantém rastreabilidade para `source_product_id`, `source_document_id`, tipo paciente/profissional, `document_storage_key`, `document_sha256`, `text_sha256` e quantidade de caracteres.
+
+A normalização aplica Unicode NFKC, uniformiza quebras de linha, remove bytes `NUL`, remove espaços finais e limita sequências excessivas de linhas vazias. O conteúdo regulatório não é resumido nem reinterpretado nesta etapa.
+
+Smoke sobre os PDFs operacionais já armazenados:
+
+```bash
+uv run python -m bulario_service.smoke_document_text
+```
+
+Saída esperada:
+
+```text
+Text extracted kind=patient source_document_id=... document_sha256=... text_sha256=... characters=... storage_key=...
+Text extracted kind=professional source_document_id=... document_sha256=... text_sha256=... characters=... storage_key=...
+extracted_texts=2
+```
+
+Nesta etapa o texto permanece em memória durante o smoke. A persistência do artefato textual e a publicação em `public.bulas` continuam separadas.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
