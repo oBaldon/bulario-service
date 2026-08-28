@@ -172,3 +172,36 @@ class BularioDocumentArtifact(Base):
         nullable=False,
         server_default=func.now(),
     )
+
+
+
+class BularioDocumentTextArtifact(Base):
+    __tablename__ = "document_text_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "document_artifact_id",
+            "normalization_version",
+            name="uq_bulario_document_text_artifact_version",
+        ),
+        Index(
+            "ix_bulario_document_text_artifacts_sha256",
+            "text_sha256",
+        ),
+        {"schema": "bulario"},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    document_artifact_id: Mapped[int] = mapped_column(
+        ForeignKey("bulario.document_artifacts.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    extraction_method: Mapped[str] = mapped_column(String(64), nullable=False)
+    normalization_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    text_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    character_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    text_content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )

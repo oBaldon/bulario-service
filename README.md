@@ -26,7 +26,8 @@ O schema `bulario` contém as estruturas operacionais do produtor:
 - `bulario.ingestion_items`;
 - `bulario.products`;
 - `bulario.document_versions`;
-- `bulario.document_artifacts`.
+- `bulario.document_artifacts`;
+- `bulario.document_text_artifacts`.
 
 A aplicação já consegue iniciar/finalizar uma execução, registrar itens descobertos e validar as transições operacionais `discovered → fetching → downloaded → normalized → ready`, com falha terminal rastreável por `error_code` e `error_message`.
 
@@ -419,6 +420,62 @@ extracted_texts=2
 ```
 
 Nesta etapa o texto permanece em memória durante o smoke. A persistência do artefato textual e a publicação em `public.bulas` continuam separadas.
+
+## Persistência operacional do texto derivado
+
+Os textos normalizados são persistidos em `bulario.document_text_artifacts`, vinculados diretamente ao PDF operacional correspondente.
+
+A identidade do artefato textual considera:
+
+```text
+document_artifact_id + normalization_version
+```
+
+O registro mantém:
+
+- método de extração (`pdftotext-layout-utf8`);
+- versão de normalização (`v1`);
+- `text_sha256`;
+- `character_count`;
+- `text_content`;
+- vínculo ao PDF por `document_artifact_id`.
+
+A cadeia de proveniência permanece:
+
+```text
+produto → versão → PDF → SHA-256 do PDF → texto normalizado → SHA-256 do texto
+```
+
+Comportamento:
+
+```text
+mesmo PDF + mesma normalization_version + mesmo texto/hash
+→ idempotente
+
+mesmo PDF + mesma normalization_version + texto/hash divergente
+→ conflito operacional
+
+mesmo PDF + nova normalization_version
+→ novo artefato textual permitido
+```
+
+Antes do uso:
+
+```bash
+uv run alembic upgrade head
+```
+
+O head esperado passa a ser `20260828_0003`.
+
+Smoke real:
+
+```bash
+uv run python -m bulario_service.smoke_document_text_persistence
+```
+
+O smoke usa os PDFs já existentes no storage, extrai/normaliza novamente, persiste os artefatos textuais e pode ser executado repetidamente de forma idempotente.
+
+Ainda não há publicação em `public.bulas`.
 
 ## Banco compartilhado com o InteliReg
 

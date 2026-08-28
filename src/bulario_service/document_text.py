@@ -7,6 +7,10 @@ from pathlib import Path
 
 from bulario_service.document_storage import StoredBulaDocument
 
+PDF_TEXT_EXTRACTION_METHOD = "pdftotext-layout-utf8"
+TEXT_NORMALIZATION_VERSION = "v1"
+
+
 
 class DocumentTextExtractionError(RuntimeError):
     """Raised when a stored PDF cannot be converted to usable text."""

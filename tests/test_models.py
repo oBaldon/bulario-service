@@ -1,5 +1,6 @@
 from bulario_service.models import (
     BularioDocumentArtifact,
+    BularioDocumentTextArtifact,
     BularioDocumentVersion,
     BularioProduct,
     IngestionItem,
@@ -55,3 +56,21 @@ def test_document_artifact_has_version_kind_and_storage_uniqueness() -> None:
 
     assert "uq_bulario_document_artifacts_version_kind" in constraint_names
     assert "uq_bulario_document_artifacts_storage_key" in constraint_names
+
+
+
+def test_document_text_artifact_belongs_to_bulario_schema() -> None:
+    assert BularioDocumentTextArtifact.__table__.schema == "bulario"
+
+
+def test_document_text_artifact_is_versioned_by_normalization() -> None:
+    constraint_names = {
+        constraint.name
+        for constraint in BularioDocumentTextArtifact.__table__.constraints
+        if constraint.name is not None
+    }
+
+    assert "uq_bulario_document_text_artifact_version" in constraint_names
+    columns = BularioDocumentTextArtifact.__table__.columns
+    assert columns["text_sha256"].type.length == 64
+    assert "text_content" in columns
