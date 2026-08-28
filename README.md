@@ -128,6 +128,208 @@ uv run python -m bulario_service.smoke_anvisa \
 
 Esse comando não grava no banco e não faz download de PDFs. Ele existe apenas para validar listagem + detalhe em ambiente real. Falhas como HTTP 403/Cloudflare devem ser tratadas como bloqueio da fonte para HTTP automatizado e não como motivo para contornar mecanismos de proteção.
 
+## Probe de transporte com Playwright
+
+O acesso HTTP direto com `httpx` retornou HTTP 403 no smoke test real. Para definir o transporte operacional antes de avançar para ingestão em volume, o projeto possui um probe que compara três caminhos na mesma sessão:
+
+1. `fetch()` executado pela página do Chromium;
+2. `BrowserContext.request` do Playwright;
+3. `httpx` usando, somente em memória, os cookies obtidos da sessão do navegador e o mesmo `User-Agent`.
+
+O probe usa `count=1` por padrão e não grava no banco nem baixa PDFs.
+
+Execução headless:
+
+```bash
+uv run python -m bulario_service.anvisa_transport_probe \
+  --period-start 2026-08-26T00:00:00.000Z \
+  --period-end 2026-08-29T00:00:00.000Z
+```
+
+Execução com navegador visível:
+
+```bash
+uv run python -m bulario_service.anvisa_transport_probe \
+  --period-start 2026-08-26T00:00:00.000Z \
+  --period-end 2026-08-29T00:00:00.000Z \
+  --headed
+```
+
+O perfil persistente fica em `.playwright/anvisa-profile`, já ignorado pelo Git. Cookies não são impressos nem persistidos pelo probe fora do próprio perfil do Chromium.
+
+A escolha do transporte definitivo deve ser feita somente após comparar os resultados reais. A preferência técnica é utilizar o caminho de menor custo que permaneça estável para listagem, detalhes e documentos.
+
+## Observação da requisição real da SPA
+
+Quando a navegação headed responde `200`, mas chamadas reproduzidas imediatamente retornam `403`, use o observador de rede para capturar a primeira chamada relevante que o próprio frontend fizer com sucesso.
+
+Execute:
+
+```bash
+uv run python -m bulario_service.anvisa_network_observer --headed
+```
+
+Depois, na janela do Chromium:
+
+1. aguarde o Bulário carregar;
+2. faça uma busca normal ou abra o detalhe de um produto;
+3. o processo capturará a primeira resposta `200` de listagem, detalhe ou documento;
+4. em seguida comparará a mesma URL via `page.fetch`, `context.request` e `httpx`.
+
+O observador redige headers sensíveis como `Cookie`, `Authorization` e `Set-Cookie` antes de imprimir qualquer informação. Ele não persiste tokens ou cookies fora do perfil do Chromium.
+
+O objetivo desse passo é identificar o estado/requisição real utilizada pela SPA antes de escolher o transporte definitivo da ingestão.
+
+
+## Google Chrome como browser do Playwright
+
+O Chromium empacotado pelo Playwright recebeu bloqueio da origem durante os testes, enquanto o Google Chrome instalado no mesmo host acessou o Bulário normalmente. Por isso, os probes Playwright usam `channel="chrome"` por padrão e um perfil persistente separado:
+
+```text
+.playwright/anvisa-profile-google-chrome
+```
+
+Teste do observador com Google Chrome visível:
+
+```bash
+uv run python -m bulario_service.anvisa_network_observer --headed
+```
+
+Teste comparativo de transportes com Google Chrome:
+
+```bash
+uv run python -m bulario_service.anvisa_transport_probe \
+  --period-start 2026-08-26T00:00:00.000Z \
+  --period-end 2026-08-29T00:00:00.000Z \
+  --headed
+```
+
+Para comparação diagnóstica com o Chromium empacotado pelo Playwright, use explicitamente:
+
+```bash
+--browser-channel chromium
+```
+
+Essa seleção ainda é diagnóstica e não define o transporte definitivo do pipeline de ingestão.
+
+## Bootstrap de sessão para HTTP direto
+
+Após validar que `httpx` funciona quando recebe a sessão estabelecida pelo Google Chrome, o projeto possui um bootstrap dedicado:
+
+- `AnvisaBrowserSessionBootstrap`: abre o Chrome, acessa o Bulário, coleta cookies + `User-Agent` em memória e fecha o browser;
+- `AnvisaAuthenticatedHttpClient`: cria um `httpx.Client` com esse estado.
+
+O smoke abaixo valida se o HTTP direto continua funcionando **depois que o browser já foi fechado**:
+
+```bash
+uv run python -m bulario_service.smoke_anvisa_session \
+  --period-start 2026-08-26T00:00:00.000Z \
+  --period-end 2026-08-29T00:00:00.000Z \
+  --headed
+```
+
+O teste executa somente:
+
+1. bootstrap da sessão;
+2. fechamento do Chrome;
+3. uma página pequena de discovery via `httpx`;
+4. detalhe do primeiro produto retornado via `httpx`.
+
+Ainda não há renovação automática de sessão, ingestão em massa ou download de PDFs nesta etapa.
+
+## Robustez HTTP para detalhe e histórico
+
+O connector usa timeout de leitura de 60 segundos por padrão e até três tentativas para falhas transitórias. O comportamento é diferente por classe de erro:
+
+- `403`: sessão rejeitada; não é repetido automaticamente pelo connector;
+- `500`, `502`, `503`, `504`: retry com backoff;
+- `ConnectTimeout` e `ReadTimeout`: retry com backoff;
+- outros erros HTTP: falha imediata.
+
+O smoke de sessão imprime telemetria segura por chamada:
+
+```text
+ANVISA HTTP path=/api/consulta/bulario/1174609 page=1 attempt=1 status=200 elapsed=2.81s outcome=ok
+```
+
+A telemetria contém somente método, path, página, tentativa, status, duração e resultado. Cookies, tokens e headers sensíveis não são registrados.
+
+## Download e validação de PDFs
+
+O serviço possui downloader documental para os tokens de bula retornados pelo detalhe da ANVISA.
+
+Para cada documento paciente/profissional, o downloader:
+
+- usa a mesma sessão `httpx` criada após o bootstrap do Google Chrome;
+- chama o endpoint de documento com o token temporário;
+- exige HTTP `200`;
+- rejeita corpo vazio;
+- valida a assinatura binária `%PDF-`;
+- calcula SHA-256;
+- retorna bytes, tamanho, hash, tipo e `source_document_id` em memória;
+- nunca inclui o token temporário na telemetria.
+
+O smoke real baixa somente os PDFs da versão vigente do primeiro produto encontrado:
+
+```bash
+uv run python -m bulario_service.smoke_anvisa_documents \
+  --period-start 2026-08-26T00:00:00.000Z \
+  --period-end 2026-08-29T00:00:00.000Z \
+  --headed
+```
+
+A saída esperada inclui linhas como:
+
+```text
+ANVISA PDF type=patient source_document_id=35480554 attempt=1 status=200 bytes=123456 elapsed=0.80s outcome=ok
+PDF validated type=patient bytes=123456 sha256=<64 hex>
+```
+
+O token da ANVISA não é impresso. Nesta etapa os bytes permanecem apenas em memória; storage definitivo e extração textual entram em incrementos posteriores.
+
+## Storage local de documentos
+
+Os PDFs validados podem ser persistidos em storage local por `LocalDocumentStorage`.
+
+A storage key é relativa e determinística:
+
+```text
+bulas/{source_product_id}/{source_document_id}/{patient|professional}.pdf
+```
+
+Exemplo:
+
+```text
+bulas/1174609/35480554/patient.pdf
+```
+
+A implementação:
+
+- nunca persiste caminho absoluto como storage key;
+- rejeita tentativa de escape da raiz de storage;
+- grava em arquivo temporário e promove via rename atômico;
+- recalcula SHA-256 e tamanho após a escrita;
+- reutiliza idempotentemente o arquivo quando a mesma key já contém o mesmo hash;
+- gera conflito quando a mesma key contém conteúdo diferente;
+- não sobrescreve silenciosamente uma versão documental divergente.
+
+O smoke real executa discovery, detalhe, download dos PDFs vigentes e storage local:
+
+```bash
+uv run python -m bulario_service.smoke_anvisa_storage \
+  --period-start 2026-08-26T00:00:00.000Z \
+  --period-end 2026-08-29T00:00:00.000Z \
+  --headed
+```
+
+Por padrão, a raiz física é `./storage`, ignorada pelo Git. Ela pode ser alterada com:
+
+```bash
+--storage-root /caminho/para/storage
+```
+
+Nesta etapa não há ainda persistência dos metadados no banco, publicação no contrato `public.bulas` ou extração de texto.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.

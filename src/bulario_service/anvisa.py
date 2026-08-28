@@ -1,5 +1,6 @@
 from dataclasses import dataclass
-from typing import Any
+import time
+from typing import Any, Callable
 
 import httpx
 
@@ -20,6 +21,24 @@ class AnvisaSourceError(RuntimeError):
 
 class AnvisaPayloadError(AnvisaSourceError):
     """Raised when ANVISA returns an unexpected or invalid payload."""
+
+
+class AnvisaAccessDeniedError(AnvisaSourceError):
+    """Raised when the ANVISA source rejects the current session."""
+
+
+@dataclass(frozen=True)
+class RequestTrace:
+    method: str
+    path: str
+    page: int | None
+    attempt: int
+    status_code: int | None
+    elapsed_seconds: float
+    outcome: str
+
+
+TraceSink = Callable[[RequestTrace], None]
 
 
 @dataclass(frozen=True)
@@ -72,13 +91,31 @@ class AnvisaBularioConnector:
         *,
         client: httpx.Client | None = None,
         base_url: str = DEFAULT_BASE_URL,
-        timeout_seconds: float = 20.0,
+        timeout_seconds: float = 60.0,
+        max_attempts: int = 3,
+        retry_backoff_seconds: tuple[float, ...] = (2.0, 5.0),
+        trace_sink: TraceSink | None = None,
     ) -> None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be greater than or equal to 1")
+        if len(retry_backoff_seconds) < max_attempts - 1:
+            raise ValueError(
+                "retry_backoff_seconds must cover all retry attempts"
+            )
+
         self._owns_client = client is None
         self._client = client or httpx.Client(
             base_url=base_url,
-            timeout=timeout_seconds,
+            timeout=httpx.Timeout(
+                connect=min(timeout_seconds, 10.0),
+                read=timeout_seconds,
+                write=timeout_seconds,
+                pool=min(timeout_seconds, 10.0),
+            ),
         )
+        self._max_attempts = max_attempts
+        self._retry_backoff_seconds = retry_backoff_seconds
+        self._trace_sink = trace_sink
 
     def close(self) -> None:
         if self._owns_client:
@@ -214,24 +251,164 @@ class AnvisaBularioConnector:
         )
 
     def _get_json(self, path: str, *, params: dict[str, Any]) -> Any:
-        try:
-            response = self._client.get(
-                path,
-                params=params,
-                headers=_REQUEST_HEADERS,
+        page = _safe_page(params.get("page"))
+
+        for attempt in range(1, self._max_attempts + 1):
+            started = time.monotonic()
+            try:
+                response = self._client.get(
+                    path,
+                    params=params,
+                    headers=_REQUEST_HEADERS,
+                )
+            except httpx.ConnectTimeout as exc:
+                elapsed = time.monotonic() - started
+                self._emit_trace(
+                    path=path,
+                    page=page,
+                    attempt=attempt,
+                    status_code=None,
+                    elapsed_seconds=elapsed,
+                    outcome="connect_timeout",
+                )
+                if attempt < self._max_attempts:
+                    self._sleep_before_retry(attempt)
+                    continue
+                raise AnvisaSourceError(
+                    f"ANVISA connect timed out path={path} page={page}"
+                ) from exc
+            except httpx.ReadTimeout as exc:
+                elapsed = time.monotonic() - started
+                self._emit_trace(
+                    path=path,
+                    page=page,
+                    attempt=attempt,
+                    status_code=None,
+                    elapsed_seconds=elapsed,
+                    outcome="read_timeout",
+                )
+                if attempt < self._max_attempts:
+                    self._sleep_before_retry(attempt)
+                    continue
+                raise AnvisaSourceError(
+                    f"ANVISA read timed out path={path} page={page}"
+                ) from exc
+            except httpx.TimeoutException as exc:
+                elapsed = time.monotonic() - started
+                self._emit_trace(
+                    path=path,
+                    page=page,
+                    attempt=attempt,
+                    status_code=None,
+                    elapsed_seconds=elapsed,
+                    outcome="timeout",
+                )
+                if attempt < self._max_attempts:
+                    self._sleep_before_retry(attempt)
+                    continue
+                raise AnvisaSourceError(
+                    f"ANVISA request timed out path={path} page={page}"
+                ) from exc
+            except httpx.HTTPError as exc:
+                elapsed = time.monotonic() - started
+                self._emit_trace(
+                    path=path,
+                    page=page,
+                    attempt=attempt,
+                    status_code=None,
+                    elapsed_seconds=elapsed,
+                    outcome="http_error",
+                )
+                raise AnvisaSourceError(
+                    f"ANVISA request failed path={path} page={page}"
+                ) from exc
+
+            elapsed = time.monotonic() - started
+            status = response.status_code
+
+            if status == 200:
+                self._emit_trace(
+                    path=path,
+                    page=page,
+                    attempt=attempt,
+                    status_code=status,
+                    elapsed_seconds=elapsed,
+                    outcome="ok",
+                )
+                try:
+                    return response.json()
+                except ValueError as exc:
+                    raise AnvisaPayloadError(
+                        f"ANVISA returned invalid JSON path={path} page={page}"
+                    ) from exc
+
+            if status == 403:
+                self._emit_trace(
+                    path=path,
+                    page=page,
+                    attempt=attempt,
+                    status_code=status,
+                    elapsed_seconds=elapsed,
+                    outcome="access_denied",
+                )
+                raise AnvisaAccessDeniedError(
+                    f"ANVISA returned HTTP 403 path={path} page={page}"
+                )
+
+            if status in {500, 502, 503, 504}:
+                self._emit_trace(
+                    path=path,
+                    page=page,
+                    attempt=attempt,
+                    status_code=status,
+                    elapsed_seconds=elapsed,
+                    outcome="transient_http_error",
+                )
+                if attempt < self._max_attempts:
+                    self._sleep_before_retry(attempt)
+                    continue
+
+            self._emit_trace(
+                path=path,
+                page=page,
+                attempt=attempt,
+                status_code=status,
+                elapsed_seconds=elapsed,
+                outcome="http_error",
             )
-        except httpx.TimeoutException as exc:
-            raise AnvisaSourceError("ANVISA request timed out") from exc
-        except httpx.HTTPError as exc:
-            raise AnvisaSourceError("ANVISA request failed") from exc
+            raise AnvisaSourceError(
+                f"ANVISA returned HTTP {status} path={path} page={page}"
+            )
 
-        if response.status_code != 200:
-            raise AnvisaSourceError(f"ANVISA returned HTTP {response.status_code}")
+        raise AssertionError("unreachable")
 
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise AnvisaPayloadError("ANVISA returned invalid JSON") from exc
+    def _sleep_before_retry(self, attempt: int) -> None:
+        time.sleep(self._retry_backoff_seconds[attempt - 1])
+
+    def _emit_trace(
+        self,
+        *,
+        path: str,
+        page: int | None,
+        attempt: int,
+        status_code: int | None,
+        elapsed_seconds: float,
+        outcome: str,
+    ) -> None:
+        if self._trace_sink is None:
+            return
+
+        self._trace_sink(
+            RequestTrace(
+                method="GET",
+                path=path,
+                page=page,
+                attempt=attempt,
+                status_code=status_code,
+                elapsed_seconds=elapsed_seconds,
+                outcome=outcome,
+            )
+        )
 
     @staticmethod
     def _parse_discovery_page(payload: Any) -> DiscoveryPage:
@@ -324,3 +501,14 @@ def _optional_string(value: Any) -> str | None:
     if isinstance(value, (str, int)):
         return str(value)
     raise AnvisaPayloadError("expected string-compatible value")
+
+
+
+def _safe_page(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None

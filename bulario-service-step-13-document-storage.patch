@@ -1,0 +1,809 @@
+diff --git a/.gitignore b/.gitignore
+index 1639110..471ecfa 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -19,4 +19,5 @@ __pycache__/
+ # Test artifacts
+ .coverage
+ coverage.xml
+-htmlcov/
+\ No newline at end of file
++htmlcov/
++storage/
+diff --git a/README.md b/README.md
+index 9d53561..52d1e4f 100644
+--- a/README.md
++++ b/README.md
+@@ -287,6 +287,49 @@ PDF validated type=patient bytes=123456 sha256=<64 hex>
+ 
+ O token da ANVISA não é impresso. Nesta etapa os bytes permanecem apenas em memória; storage definitivo e extração textual entram em incrementos posteriores.
+ 
++## Storage local de documentos
++
++Os PDFs validados podem ser persistidos em storage local por `LocalDocumentStorage`.
++
++A storage key é relativa e determinística:
++
++```text
++bulas/{source_product_id}/{source_document_id}/{patient|professional}.pdf
++```
++
++Exemplo:
++
++```text
++bulas/1174609/35480554/patient.pdf
++```
++
++A implementação:
++
++- nunca persiste caminho absoluto como storage key;
++- rejeita tentativa de escape da raiz de storage;
++- grava em arquivo temporário e promove via rename atômico;
++- recalcula SHA-256 e tamanho após a escrita;
++- reutiliza idempotentemente o arquivo quando a mesma key já contém o mesmo hash;
++- gera conflito quando a mesma key contém conteúdo diferente;
++- não sobrescreve silenciosamente uma versão documental divergente.
++
++O smoke real executa discovery, detalhe, download dos PDFs vigentes e storage local:
++
++```bash
++uv run python -m bulario_service.smoke_anvisa_storage \
++  --period-start 2026-08-26T00:00:00.000Z \
++  --period-end 2026-08-29T00:00:00.000Z \
++  --headed
++```
++
++Por padrão, a raiz física é `./storage`, ignorada pelo Git. Ela pode ser alterada com:
++
++```bash
++--storage-root /caminho/para/storage
++```
++
++Nesta etapa não há ainda persistência dos metadados no banco, publicação no contrato `public.bulas` ou extração de texto.
++
+ ## Banco compartilhado com o InteliReg
+ 
+ Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
+diff --git a/src/bulario_service/document_storage.py b/src/bulario_service/document_storage.py
+new file mode 100644
+index 0000000..0ff31ab
+--- /dev/null
++++ b/src/bulario_service/document_storage.py
+@@ -0,0 +1,189 @@
++from dataclasses import dataclass
++import hashlib
++import os
++from pathlib import Path
++import tempfile
++
++from bulario_service.anvisa_documents import (
++    DocumentKind,
++    DownloadedBulaDocument,
++)
++
++
++class DocumentStorageError(RuntimeError):
++    """Base error for document storage operations."""
++
++
++class DocumentStorageConflictError(DocumentStorageError):
++    """Raised when a deterministic storage key already has different bytes."""
++
++
++@dataclass(frozen=True)
++class StoredBulaDocument:
++    source_product_id: int
++    source_document_id: int
++    kind: DocumentKind
++    storage_key: str
++    sha256: str
++    size_bytes: int
++
++
++class LocalDocumentStorage:
++    def __init__(self, root: Path) -> None:
++        self._root = root.resolve()
++
++    @property
++    def root(self) -> Path:
++        return self._root
++
++    def build_storage_key(
++        self,
++        *,
++        source_product_id: int,
++        source_document_id: int,
++        kind: DocumentKind,
++    ) -> str:
++        if source_product_id < 1:
++            raise ValueError(
++                "source_product_id must be greater than or equal to 1"
++            )
++        if source_document_id < 1:
++            raise ValueError(
++                "source_document_id must be greater than or equal to 1"
++            )
++        if kind not in {"patient", "professional"}:
++            raise ValueError("kind must be patient or professional")
++
++        return (
++            f"bulas/{source_product_id}/"
++            f"{source_document_id}/{kind}.pdf"
++        )
++
++    def store(
++        self,
++        *,
++        source_product_id: int,
++        document: DownloadedBulaDocument,
++    ) -> StoredBulaDocument:
++        storage_key = self.build_storage_key(
++            source_product_id=source_product_id,
++            source_document_id=document.source_document_id,
++            kind=document.kind,
++        )
++
++        target = self._resolve_storage_key(storage_key)
++        target.parent.mkdir(parents=True, exist_ok=True)
++
++        if target.exists():
++            existing_sha256, existing_size = _hash_file(target)
++            if existing_sha256 != document.sha256:
++                raise DocumentStorageConflictError(
++                    "document storage conflict "
++                    f"storage_key={storage_key} "
++                    f"expected_sha256={document.sha256} "
++                    f"existing_sha256={existing_sha256}"
++                )
++
++            if existing_size != document.size_bytes:
++                raise DocumentStorageConflictError(
++                    "document storage size conflict "
++                    f"storage_key={storage_key}"
++                )
++
++            return StoredBulaDocument(
++                source_product_id=source_product_id,
++                source_document_id=document.source_document_id,
++                kind=document.kind,
++                storage_key=storage_key,
++                sha256=existing_sha256,
++                size_bytes=existing_size,
++            )
++
++        self._atomic_write(
++            target=target,
++            content=document.content,
++        )
++
++        stored_sha256, stored_size = _hash_file(target)
++        if stored_sha256 != document.sha256:
++            try:
++                target.unlink()
++            except FileNotFoundError:
++                pass
++            raise DocumentStorageError(
++                "stored document hash verification failed "
++                f"storage_key={storage_key}"
++            )
++
++        if stored_size != document.size_bytes:
++            try:
++                target.unlink()
++            except FileNotFoundError:
++                pass
++            raise DocumentStorageError(
++                "stored document size verification failed "
++                f"storage_key={storage_key}"
++            )
++
++        return StoredBulaDocument(
++            source_product_id=source_product_id,
++            source_document_id=document.source_document_id,
++            kind=document.kind,
++            storage_key=storage_key,
++            sha256=stored_sha256,
++            size_bytes=stored_size,
++        )
++
++    def resolve(self, storage_key: str) -> Path:
++        return self._resolve_storage_key(storage_key)
++
++    def _resolve_storage_key(self, storage_key: str) -> Path:
++        candidate = (self._root / storage_key).resolve()
++
++        try:
++            candidate.relative_to(self._root)
++        except ValueError as exc:
++            raise DocumentStorageError(
++                f"unsafe storage key: {storage_key}"
++            ) from exc
++
++        return candidate
++
++    def _atomic_write(
++        self,
++        *,
++        target: Path,
++        content: bytes,
++    ) -> None:
++        fd, temporary_path_str = tempfile.mkstemp(
++            dir=target.parent,
++            prefix=f".{target.name}.",
++            suffix=".tmp",
++        )
++        temporary_path = Path(temporary_path_str)
++
++        try:
++            with os.fdopen(fd, "wb") as handle:
++                handle.write(content)
++                handle.flush()
++                os.fsync(handle.fileno())
++
++            os.replace(temporary_path, target)
++        except Exception:
++            try:
++                temporary_path.unlink()
++            except FileNotFoundError:
++                pass
++            raise
++
++
++def _hash_file(path: Path) -> tuple[str, int]:
++    digest = hashlib.sha256()
++    size = 0
++
++    with path.open("rb") as handle:
++        while chunk := handle.read(1024 * 1024):
++            digest.update(chunk)
++            size += len(chunk)
++
++    return digest.hexdigest(), size
+diff --git a/src/bulario_service/smoke_anvisa_storage.py b/src/bulario_service/smoke_anvisa_storage.py
+new file mode 100644
+index 0000000..215fc6c
+--- /dev/null
++++ b/src/bulario_service/smoke_anvisa_storage.py
+@@ -0,0 +1,236 @@
++import argparse
++import sys
++from pathlib import Path
++
++from bulario_service.anvisa import (
++    AnvisaBularioConnector,
++    AnvisaSourceError,
++    RequestTrace,
++)
++from bulario_service.anvisa_documents import (
++    AnvisaDocumentDownloader,
++    DocumentDownloadTrace,
++)
++from bulario_service.anvisa_session import (
++    AnvisaAuthenticatedHttpClient,
++    AnvisaBrowserSessionBootstrap,
++)
++from bulario_service.anvisa_transport_probe import DEFAULT_PROFILE_DIR
++from bulario_service.document_storage import (
++    DocumentStorageError,
++    LocalDocumentStorage,
++)
++
++
++DEFAULT_STORAGE_ROOT = Path("storage")
++
++
++def print_request_trace(trace: RequestTrace) -> None:
++    status = trace.status_code if trace.status_code is not None else "-"
++    page = trace.page if trace.page is not None else "-"
++    print(
++        "ANVISA HTTP "
++        f"path={trace.path} "
++        f"page={page} "
++        f"attempt={trace.attempt} "
++        f"status={status} "
++        f"elapsed={trace.elapsed_seconds:.2f}s "
++        f"outcome={trace.outcome}"
++    )
++
++
++def print_document_trace(trace: DocumentDownloadTrace) -> None:
++    status = trace.status_code if trace.status_code is not None else "-"
++    size = trace.size_bytes if trace.size_bytes is not None else "-"
++    print(
++        "ANVISA PDF "
++        f"type={trace.kind} "
++        f"source_document_id={trace.source_document_id} "
++        f"attempt={trace.attempt} "
++        f"status={status} "
++        f"bytes={size} "
++        f"elapsed={trace.elapsed_seconds:.2f}s "
++        f"outcome={trace.outcome}"
++    )
++
++
++def build_parser() -> argparse.ArgumentParser:
++    parser = argparse.ArgumentParser(
++        description=(
++            "Valida discovery + detalhe + download + storage local dos PDFs "
++            "da versão vigente."
++        )
++    )
++    parser.add_argument("--period-start", required=True)
++    parser.add_argument("--period-end", required=True)
++    parser.add_argument(
++        "--profile-dir",
++        type=Path,
++        default=DEFAULT_PROFILE_DIR,
++    )
++    parser.add_argument(
++        "--storage-root",
++        type=Path,
++        default=DEFAULT_STORAGE_ROOT,
++    )
++    parser.add_argument(
++        "--headed",
++        action="store_true",
++        help="Executa o bootstrap com Google Chrome visível.",
++    )
++    parser.add_argument(
++        "--page-size",
++        type=int,
++        default=1,
++    )
++    return parser
++
++
++def run_smoke(
++    *,
++    period_start: str,
++    period_end: str,
++    profile_dir: Path,
++    storage_root: Path,
++    headed: bool,
++    page_size: int,
++) -> int:
++    try:
++        print("Bootstrapping ANVISA session with Google Chrome...")
++        bootstrap = AnvisaBrowserSessionBootstrap(
++            profile_dir=profile_dir,
++            headless=not headed,
++        )
++        session_state = bootstrap.bootstrap()
++        print("Browser session bootstrap: OK")
++        print("Browser has been closed. Starting httpx validation...")
++
++        storage = LocalDocumentStorage(storage_root)
++
++        with AnvisaAuthenticatedHttpClient(session_state) as authenticated:
++            connector = AnvisaBularioConnector(
++                client=authenticated.client,
++                max_attempts=3,
++                retry_backoff_seconds=(2.0, 5.0),
++                trace_sink=print_request_trace,
++            )
++
++            discovery = connector.discover_page(
++                page=1,
++                page_size=page_size,
++                period_start=period_start,
++                period_end=period_end,
++            )
++            print("httpx discovery after browser close: OK")
++            print(f"total_elements={discovery.total_elements}")
++            print(f"returned_items={len(discovery.items)}")
++
++            if not discovery.items:
++                print(
++                    "Nenhum produto encontrado no período; "
++                    "detalhe, PDFs e storage não foram testados."
++                )
++                return 0
++
++            product = discovery.items[0]
++            print(f"source_product_id={product.source_product_id}")
++            print(f"product_name={product.product_name}")
++
++            detail = connector.get_product_detail(
++                product.source_product_id
++            )
++            current_versions = [
++                version
++                for version in detail.versions
++                if version.current
++            ]
++            if len(current_versions) != 1:
++                raise RuntimeError(
++                    "expected exactly one current document version"
++                )
++
++            current = current_versions[0]
++            print("httpx product detail after browser close: OK")
++            print(f"versions={len(detail.versions)}")
++            print(
++                "current_source_document_id="
++                f"{current.source_document_id}"
++            )
++
++            downloader = AnvisaDocumentDownloader(
++                authenticated.client,
++                max_attempts=3,
++                retry_backoff_seconds=(2.0, 5.0),
++                trace_sink=print_document_trace,
++            )
++
++            downloaded = []
++            if current.patient_token:
++                downloaded.append(
++                    downloader.download(
++                        source_document_id=current.source_document_id,
++                        kind="patient",
++                        token=current.patient_token,
++                    )
++                )
++            else:
++                print("Current version has no patient PDF token.")
++
++            if current.professional_token:
++                downloaded.append(
++                    downloader.download(
++                        source_document_id=current.source_document_id,
++                        kind="professional",
++                        token=current.professional_token,
++                    )
++                )
++            else:
++                print("Current version has no professional PDF token.")
++
++            if not downloaded:
++                print("Nenhum PDF disponível na versão vigente.")
++                return 0
++
++            stored = []
++            for document in downloaded:
++                stored_document = storage.store(
++                    source_product_id=product.source_product_id,
++                    document=document,
++                )
++                stored.append(stored_document)
++                print(
++                    "PDF stored "
++                    f"type={stored_document.kind} "
++                    f"storage_key={stored_document.storage_key} "
++                    f"bytes={stored_document.size_bytes} "
++                    f"sha256={stored_document.sha256}"
++                )
++
++            print(f"stored_pdfs={len(stored)}")
++            print(f"storage_root={storage.root}")
++            return 0
++
++    except (AnvisaSourceError, DocumentStorageError, RuntimeError) as exc:
++        print(
++            f"ANVISA storage smoke failed: {exc}",
++            file=sys.stderr,
++        )
++        return 2
++
++
++def main() -> None:
++    args = build_parser().parse_args()
++    raise SystemExit(
++        run_smoke(
++            period_start=args.period_start,
++            period_end=args.period_end,
++            profile_dir=args.profile_dir,
++            storage_root=args.storage_root,
++            headed=args.headed,
++            page_size=args.page_size,
++        )
++    )
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/tests/test_document_storage.py b/tests/test_document_storage.py
+new file mode 100644
+index 0000000..dcd04b3
+--- /dev/null
++++ b/tests/test_document_storage.py
+@@ -0,0 +1,136 @@
++import hashlib
++from pathlib import Path
++
++import pytest
++
++from bulario_service.anvisa_documents import DownloadedBulaDocument
++from bulario_service.document_storage import (
++    DocumentStorageConflictError,
++    DocumentStorageError,
++    LocalDocumentStorage,
++)
++
++
++PDF_BYTES = b"%PDF-1.7\nstored test\n%%EOF"
++
++
++def make_document(
++    *,
++    source_document_id: int = 35480554,
++    kind: str = "patient",
++    content: bytes = PDF_BYTES,
++) -> DownloadedBulaDocument:
++    return DownloadedBulaDocument(
++        source_document_id=source_document_id,
++        kind=kind,  # type: ignore[arg-type]
++        content=content,
++        size_bytes=len(content),
++        sha256=hashlib.sha256(content).hexdigest(),
++        content_type="application/pdf",
++    )
++
++
++def test_build_storage_key_is_relative_and_deterministic(tmp_path: Path) -> None:
++    storage = LocalDocumentStorage(tmp_path)
++
++    key = storage.build_storage_key(
++        source_product_id=1174609,
++        source_document_id=35480554,
++        kind="patient",
++    )
++
++    assert key == "bulas/1174609/35480554/patient.pdf"
++    assert not key.startswith("/")
++
++
++def test_store_writes_document_and_verifies_hash(tmp_path: Path) -> None:
++    storage = LocalDocumentStorage(tmp_path)
++    document = make_document()
++
++    stored = storage.store(
++        source_product_id=1174609,
++        document=document,
++    )
++
++    assert stored.storage_key == (
++        "bulas/1174609/35480554/patient.pdf"
++    )
++    assert stored.sha256 == document.sha256
++    assert stored.size_bytes == len(PDF_BYTES)
++
++    path = storage.resolve(stored.storage_key)
++    assert path.read_bytes() == PDF_BYTES
++
++
++def test_store_is_idempotent_for_same_hash(tmp_path: Path) -> None:
++    storage = LocalDocumentStorage(tmp_path)
++    document = make_document()
++
++    first = storage.store(
++        source_product_id=1174609,
++        document=document,
++    )
++    second = storage.store(
++        source_product_id=1174609,
++        document=document,
++    )
++
++    assert second == first
++    assert storage.resolve(second.storage_key).read_bytes() == PDF_BYTES
++
++
++def test_store_rejects_same_key_with_different_content(tmp_path: Path) -> None:
++    storage = LocalDocumentStorage(tmp_path)
++    original = make_document(content=PDF_BYTES)
++    changed = make_document(content=b"%PDF-1.7\nchanged\n%%EOF")
++
++    storage.store(
++        source_product_id=1174609,
++        document=original,
++    )
++
++    with pytest.raises(
++        DocumentStorageConflictError,
++        match="storage conflict",
++    ):
++        storage.store(
++            source_product_id=1174609,
++            document=changed,
++        )
++
++
++def test_resolve_rejects_path_escape(tmp_path: Path) -> None:
++    storage = LocalDocumentStorage(tmp_path)
++
++    with pytest.raises(DocumentStorageError, match="unsafe storage key"):
++        storage.resolve("../outside.pdf")
++
++
++@pytest.mark.parametrize("kind", ["other", "", "PATIENT"])
++def test_build_storage_key_rejects_unknown_kind(
++    tmp_path: Path,
++    kind: str,
++) -> None:
++    storage = LocalDocumentStorage(tmp_path)
++
++    with pytest.raises(ValueError, match="kind"):
++        storage.build_storage_key(
++            source_product_id=1,
++            source_document_id=1,
++            kind=kind,  # type: ignore[arg-type]
++        )
++
++
++def test_atomic_write_does_not_leave_temp_file(tmp_path: Path) -> None:
++    storage = LocalDocumentStorage(tmp_path)
++    document = make_document(kind="professional")
++
++    stored = storage.store(
++        source_product_id=1174609,
++        document=document,
++    )
++
++    directory = storage.resolve(stored.storage_key).parent
++    names = [path.name for path in directory.iterdir()]
++
++    assert names == ["professional.pdf"]
+diff --git a/tests/test_smoke_anvisa_storage.py b/tests/test_smoke_anvisa_storage.py
+new file mode 100644
+index 0000000..7dae493
+--- /dev/null
++++ b/tests/test_smoke_anvisa_storage.py
+@@ -0,0 +1,158 @@
++from pathlib import Path
++from unittest.mock import Mock
++
++from bulario_service import smoke_anvisa_storage
++from bulario_service.anvisa import (
++    BulaVersion,
++    DiscoveredProduct,
++    DiscoveryPage,
++    ProductDetail,
++)
++from bulario_service.anvisa_documents import DownloadedBulaDocument
++from bulario_service.anvisa_session import BrowserSessionState
++from bulario_service.document_storage import StoredBulaDocument
++
++
++def test_storage_smoke_stores_both_current_pdfs(
++    monkeypatch,
++    tmp_path: Path,
++    capsys,
++) -> None:
++    bootstrap = Mock()
++    bootstrap.bootstrap.return_value = BrowserSessionState(
++        cookies=(),
++        user_agent="Chrome UA",
++        referer="https://consultas.anvisa.gov.br/",
++    )
++    monkeypatch.setattr(
++        smoke_anvisa_storage,
++        "AnvisaBrowserSessionBootstrap",
++        lambda **kwargs: bootstrap,
++    )
++
++    fake_http = Mock()
++    fake_http.client = Mock()
++    fake_http.__enter__ = Mock(return_value=fake_http)
++    fake_http.__exit__ = Mock(return_value=None)
++    monkeypatch.setattr(
++        smoke_anvisa_storage,
++        "AnvisaAuthenticatedHttpClient",
++        lambda state: fake_http,
++    )
++
++    product = DiscoveredProduct(
++        source_product_id=1174609,
++        registration_number="123",
++        product_name="TESTE",
++        current_expedient="456",
++        company_name="EMPRESA",
++        company_cnpj="00000000000000",
++        process_number="25351000000000000",
++        publication_date="2026-08-28",
++        raw_payload={},
++    )
++    discovery = DiscoveryPage(
++        items=(product,),
++        total_elements=1,
++        total_pages=1,
++        page=1,
++        page_size=1,
++        last=True,
++    )
++    version = BulaVersion(
++        source_document_id=35480554,
++        expedient="456",
++        registration_number="123",
++        publication_date="28/08/2026",
++        status=None,
++        patient_token="patient-token",
++        professional_token="professional-token",
++        current=True,
++        raw_payload={},
++    )
++    detail = ProductDetail(
++        source_product_id=1174609,
++        registration_number="123",
++        product_name="TESTE",
++        versions=(version,),
++    )
++
++    connector = Mock()
++    connector.discover_page.return_value = discovery
++    connector.get_product_detail.return_value = detail
++    monkeypatch.setattr(
++        smoke_anvisa_storage,
++        "AnvisaBularioConnector",
++        lambda client, **kwargs: connector,
++    )
++
++    downloader = Mock()
++    downloader.download.side_effect = [
++        DownloadedBulaDocument(
++            source_document_id=35480554,
++            kind="patient",
++            content=b"%PDF-patient",
++            size_bytes=12,
++            sha256="a" * 64,
++            content_type="application/pdf",
++        ),
++        DownloadedBulaDocument(
++            source_document_id=35480554,
++            kind="professional",
++            content=b"%PDF-professional",
++            size_bytes=17,
++            sha256="b" * 64,
++            content_type="application/pdf",
++        ),
++    ]
++    monkeypatch.setattr(
++        smoke_anvisa_storage,
++        "AnvisaDocumentDownloader",
++        lambda client, **kwargs: downloader,
++    )
++
++    storage = Mock()
++    storage.root = tmp_path.resolve()
++    storage.store.side_effect = [
++        StoredBulaDocument(
++            source_product_id=1174609,
++            source_document_id=35480554,
++            kind="patient",
++            storage_key="bulas/1174609/35480554/patient.pdf",
++            sha256="a" * 64,
++            size_bytes=12,
++        ),
++        StoredBulaDocument(
++            source_product_id=1174609,
++            source_document_id=35480554,
++            kind="professional",
++            storage_key=(
++                "bulas/1174609/35480554/professional.pdf"
++            ),
++            sha256="b" * 64,
++            size_bytes=17,
++        ),
++    ]
++    monkeypatch.setattr(
++        smoke_anvisa_storage,
++        "LocalDocumentStorage",
++        lambda root: storage,
++    )
++
++    result = smoke_anvisa_storage.run_smoke(
++        period_start="2026-08-26",
++        period_end="2026-08-29",
++        profile_dir=Path(".playwright/test"),
++        storage_root=tmp_path,
++        headed=True,
++        page_size=1,
++    )
++
++    assert result == 0
++    assert storage.store.call_count == 2
++
++    output = capsys.readouterr().out
++    assert "stored_pdfs=2" in output
++    assert "bulas/1174609/35480554/patient.pdf" in output
++    assert "patient-token" not in output
++    assert "professional-token" not in output
