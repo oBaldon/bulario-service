@@ -27,9 +27,18 @@ O schema `bulario` contém somente as estruturas operacionais necessárias neste
 
 A aplicação já consegue iniciar/finalizar uma execução, registrar itens descobertos e validar as transições operacionais `discovered → fetching → downloaded → normalized → ready`, com falha terminal rastreável por `error_code` e `error_message`.
 
+A integração inicial com o Bulário da ANVISA já possui adapter para:
+
+- descoberta paginada de produtos por período, usando `count=100` por padrão;
+- leitura de detalhe e histórico por `idProduto`;
+- paginação do histórico;
+- deduplicação da bula vigente quando ela também aparece no histórico;
+- normalização de erro HTTP, timeout, JSON inválido e payload inesperado.
+
+A interface `/api/consulta/*` foi observada no frontend público da ANVISA e não é tratada como API pública documentada ou estável. Os testes utilizam fixtures sanitizadas derivadas das respostas reais capturadas durante a investigação.
+
 Ainda não há:
 
-- integração com a ANVISA;
 - download de PDFs;
 - extração textual;
 - publicação para o Portal.

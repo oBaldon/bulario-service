@@ -1,0 +1,40 @@
+{
+  "content": [
+    {
+      "idProduto": 1156882,
+      "numeroRegistro": "102351340",
+      "nomeProduto": "COMPLEXO B",
+      "expediente": "0810766264",
+      "razaoSocial": "EMS S/A",
+      "cnpj": "57507378000365",
+      "numeroTransacao": "10638612026",
+      "data": "2026-08-10T11:17:12.000-0300",
+      "numProcesso": "25351080622201702",
+      "idBulaPacienteProtegido": "sanitized-patient-token-1",
+      "idBulaProfissionalProtegido": "sanitized-professional-token-1",
+      "dataAtualizacao": "2026-08-27T00:00:00.000-0300"
+    },
+    {
+      "idProduto": 1162943,
+      "numeroRegistro": "167730561",
+      "nomeProduto": "CLEANKINOL",
+      "expediente": "1616789255",
+      "razaoSocial": "LEGRAND PHARMA INDÚSTRIA FARMACÊUTICA LTDA",
+      "cnpj": "05044984000126",
+      "numeroTransacao": "18245712025",
+      "data": "2025-12-17T17:21:16.000-0200",
+      "numProcesso": "25351547598201531",
+      "idBulaPacienteProtegido": "sanitized-patient-token-2",
+      "idBulaProfissionalProtegido": "sanitized-professional-token-2",
+      "dataAtualizacao": "2026-08-27T00:00:00.000-0300"
+    }
+  ],
+  "totalElements": 2,
+  "totalPages": 1,
+  "last": true,
+  "numberOfElements": 2,
+  "first": true,
+  "sort": null,
+  "number": 0,
+  "size": 100
+}
