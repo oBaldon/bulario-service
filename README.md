@@ -20,10 +20,13 @@ O Portal InteliReg permanece consumidor dos dados produzidos por este serviço.
 
 O projeto possui bootstrap Python, configuração mínima, ambiente Docker, persistência operacional inicial no PostgreSQL compartilhado com o InteliReg e operações de aplicação para controlar execuções e itens de ingestão.
 
-O schema `bulario` contém somente as estruturas operacionais necessárias neste incremento:
+O schema `bulario` contém as estruturas operacionais do produtor:
 
 - `bulario.ingestion_runs`;
-- `bulario.ingestion_items`.
+- `bulario.ingestion_items`;
+- `bulario.products`;
+- `bulario.document_versions`;
+- `bulario.document_artifacts`.
 
 A aplicação já consegue iniciar/finalizar uma execução, registrar itens descobertos e validar as transições operacionais `discovered → fetching → downloaded → normalized → ready`, com falha terminal rastreável por `error_code` e `error_message`.
 
@@ -65,9 +68,30 @@ O `uv sync` também atualiza `uv.lock` quando as dependências declaradas no `py
 
 ## Execução local
 
+A configuração local é carregada automaticamente de `.env` quando o arquivo existe. Variáveis já presentes no ambiente do processo têm precedência e não são sobrescritas pelo arquivo.
+
+Crie o arquivo local a partir do exemplo:
+
+```bash
+cp .env.example .env
+```
+
+Depois:
+
 ```bash
 uv run python -m bulario_service
 ```
+
+O mesmo carregamento é usado pelo Alembic. Portanto, com `DATABASE_URL` definido no `.env`, não é necessário executar `export DATABASE_URL=...` antes das migrations:
+
+```bash
+uv run alembic upgrade head
+uv run alembic current
+```
+
+Em Docker, CI ou produção, valores injetados pelo ambiente continuam tendo precedência sobre o `.env`.
+
+O parser local suporta o formato usado pelo projeto: comentários, linhas vazias, `KEY=VALUE`, `export KEY=VALUE` e valores entre aspas simples ou duplas.
 
 ## Testes locais
 
@@ -329,6 +353,46 @@ Por padrão, a raiz física é `./storage`, ignorada pelo Git. Ela pode ser alte
 ```
 
 Nesta etapa não há ainda persistência dos metadados no banco, publicação no contrato `public.bulas` ou extração de texto.
+
+## Persistência operacional de produtos, versões e artefatos
+
+O produtor persiste seu estado de trabalho exclusivamente no schema `bulario`.
+
+As tabelas operacionais documentais são:
+
+```text
+bulario.products
+bulario.document_versions
+bulario.document_artifacts
+```
+
+A identidade da fonte permanece separada dos hashes dos PDFs:
+
+- `source_product_id`: identidade do produto na fonte;
+- `source_document_id`: identidade da versão documental na fonte;
+- `source_fingerprint`: SHA-256 de metadados estáveis da versão, sem tokens transitórios e sem a flag `current`;
+- `document_artifacts.sha256`: SHA-256 dos bytes do PDF persistido.
+
+Uma alteração de hash sob a mesma versão/tipo de artefato, ou uma alteração do `source_fingerprint` sob o mesmo `source_document_id`, é tratada como conflito operacional e não é sobrescrita silenciosamente.
+
+`document_versions.last_ingestion_item_id` permite vincular a versão ao item de ingestão mais recente; o item referencia sua `ingestion_run`. O vínculo é opcional para smokes manuais.
+
+Antes do primeiro uso:
+
+```bash
+uv run alembic upgrade head
+```
+
+O smoke real, após aplicar a migration, executa o fluxo completo até a persistência operacional:
+
+```bash
+uv run python -m bulario_service.smoke_anvisa_persistence \
+  --period-start 2026-08-26T00:00:00.000Z \
+  --period-end 2026-08-29T00:00:00.000Z \
+  --headed
+```
+
+O comando é idempotente para a mesma versão e os mesmos hashes. Ele ainda não publica em `public.bulas`.
 
 ## Banco compartilhado com o InteliReg
 
