@@ -10,12 +10,11 @@ WORKDIR /app
 
 COPY --from=uv /uv /uvx /bin/
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY tests ./tests
 
-RUN uv sync --no-install-project
-
-RUN uv sync
+RUN uv sync --frozen --no-install-project
+RUN uv sync --frozen
 
 CMD ["uv", "run", "python", "-m", "bulario_service"]

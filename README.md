@@ -18,7 +18,7 @@ O Portal InteliReg permanece consumidor dos dados produzidos por este serviço.
 
 ## Estado atual
 
-O projeto possui bootstrap Python, configuração mínima e ambiente Docker com PostgreSQL.
+O projeto possui bootstrap Python, configuração mínima e ambiente Docker preparado para usar o PostgreSQL do InteliReg.
 
 Ainda não há:
 
@@ -67,10 +67,16 @@ Subir o ambiente:
 docker compose up --build
 ```
 
-O Compose cria somente os componentes atualmente necessários:
+O `bulario-service` não sobe um PostgreSQL próprio. No ambiente local ele reutiliza a instância PostgreSQL já executada pelo Compose do InteliReg.
 
-- `app`: aplicação Python;
-- `db`: PostgreSQL.
+Antes de subir o serviço, inicialize ao menos o banco do InteliReg:
+
+```bash
+cd ../intelireg
+docker compose up -d db
+```
+
+Por padrão, o `bulario-service` entra na rede Docker `intelireg-local_default` e conecta ao serviço `db` na porta interna `5432`. Caso o projeto InteliReg utilize outro nome de rede, ajuste `INTELIREG_DOCKER_NETWORK`.
 
 Executar os testes dentro do container:
 
@@ -84,15 +90,25 @@ Encerrar o ambiente:
 docker compose down
 ```
 
-Para também remover o volume local do PostgreSQL:
+O comando acima encerra somente os containers pertencentes ao `bulario-service`; o PostgreSQL do InteliReg permanece sob responsabilidade do Compose do Portal.
 
-```bash
-docker compose down -v
-```
+## Banco compartilhado com o InteliReg
+
+Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
+
+A separação será lógica:
+
+- tabelas operacionais do produtor serão mantidas fora do domínio público do Portal;
+- `public.bulas` continuará sendo a fronteira de publicação consumida pelo InteliReg;
+- o produtor não deverá usar `public.bulas` como tabela de trabalho da ingestão.
+
+A definição das tabelas e permissões será feita no incremento de persistência/migrations.
 
 ## Configuração
 
 As variáveis disponíveis neste estágio estão documentadas em `.env.example`.
 
 - `APP_ENV`: identifica o ambiente da aplicação;
-- `DATABASE_URL`: conexão PostgreSQL que será utilizada pela camada de persistência nos próximos incrementos.
+- `DATABASE_URL`: conexão utilizada ao executar o serviço diretamente no host;
+- `BULARIO_DOCKER_DATABASE_URL`: conexão utilizada pelo container do `bulario-service`;
+- `INTELIREG_DOCKER_NETWORK`: nome da rede Docker criada pelo Compose do InteliReg.
