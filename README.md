@@ -611,6 +611,66 @@ uv run python -m bulario_service.smoke_portal_publisher --write
 
 Uma segunda execução com `--write` deve retornar `action=unchanged`, comprovando idempotência do contrato público.
 
+## Pipeline E2E controlado
+
+O serviço possui agora uma orquestração real para um produto por execução. O objetivo deste comando é provar o fluxo completo e a rastreabilidade antes de iniciar carga em volume.
+
+Fluxo:
+
+```text
+ingestion_run
+→ discovery ANVISA
+→ ingestion_item discovered
+→ fetching
+→ detalhe e versão vigente
+→ download paciente/profissional
+→ storage + SHA-256
+→ downloaded
+→ persistência operacional
+→ extração/normalização textual
+→ persistência textual
+→ normalized
+→ BULA_CONTRACT_V1
+→ publisher public.bulas
+→ ready
+→ run completed
+```
+
+Os marcos operacionais são confirmados em transações curtas. Chamadas externas e processamento de PDF não mantêm uma transação PostgreSQL aberta.
+
+A publicação e a transição final `normalized → ready`, junto com `run → completed`, são confirmadas no mesmo commit. Se ocorrer erro antes desse commit, a transação atual é revertida e o item/run são persistidos como `failed`.
+
+Arquivos PDF já gravados no storage antes de uma falha podem permanecer no filesystem. Isso é intencional: são artefatos content-addressable/idempotentes e podem ser reutilizados na reexecução; um arquivo isolado no storage não equivale a uma publicação `ready`.
+
+Execução real controlada:
+
+```bash
+uv run python -m bulario_service.smoke_e2e_pipeline \
+  --period-start 2026-08-28T00:00:00.000Z \
+  --period-end 2026-08-29T00:00:00.000Z
+```
+
+Para visualizar o bootstrap do Chrome:
+
+```bash
+uv run python -m bulario_service.smoke_e2e_pipeline \
+  --period-start 2026-08-28T00:00:00.000Z \
+  --period-end 2026-08-29T00:00:00.000Z \
+  --headed
+```
+
+A execução processa somente o primeiro produto da primeira página (`page_size=1`). Em sucesso, a saída termina com:
+
+```text
+E2E pipeline: OK ... publish_action=inserted|unchanged ...
+run_status=completed
+item_status=ready
+```
+
+Uma reexecução idêntica deve produzir `publish_action=unchanged`, mantendo novos `ingestion_run`/`ingestion_item` de auditoria, mas sem duplicar produto, versão, PDFs, textos ou linha pública.
+
+Carga completa e incremental em volume ainda não são iniciadas por este comando.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
