@@ -477,6 +477,48 @@ O smoke usa os PDFs já existentes no storage, extrai/normaliza novamente, persi
 
 Ainda não há publicação em `public.bulas`.
 
+## Dry-run do contrato público
+
+Antes de qualquer escrita em `public.bulas`, o produtor materializa um `BulaPublicationCandidate` a partir do estado operacional e valida a completude do registro.
+
+O candidato exige:
+
+- identidade e proveniência da fonte;
+- `source_record_id`;
+- `source_fingerprint`;
+- `ingested_at`;
+- `ingestion_status=ready`;
+- metadados regulatórios disponíveis;
+- PDF paciente e profissional;
+- storage keys relativas e seguras;
+- SHA-256 de ambos os PDFs;
+- texto persistido para ambos os documentos;
+- SHA-256 do texto, método de extração e versão de normalização;
+- consistência entre texto, contagem de caracteres e hash.
+
+O identificador de origem atualmente materializado é:
+
+```text
+anvisa:{source_product_id}:{source_document_id}
+```
+
+A URL de proveniência é a interface estável do Bulário, nunca o token temporário usado para download do PDF.
+
+Smoke sem escrita no contrato público:
+
+```bash
+uv run python -m bulario_service.smoke_publication_contract
+```
+
+A saída deve conter:
+
+```text
+BULA_CONTRACT_V1 candidate: OK ...
+public_bulas_written=0
+```
+
+Este incremento é intencionalmente dry-run. O adapter SQL para `public.bulas` só deve ser habilitado após reconciliar os nomes/tipos exatos do schema consumidor e executar testes equivalentes ao consumer contract do Portal.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
