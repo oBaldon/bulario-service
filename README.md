@@ -519,6 +519,33 @@ public_bulas_written=0
 
 Este incremento é intencionalmente dry-run. O adapter SQL para `public.bulas` só deve ser habilitado após reconciliar os nomes/tipos exatos do schema consumidor e executar testes equivalentes ao consumer contract do Portal.
 
+## Reconciliação do schema consumidor
+
+O publisher não assume nomes ou tipos de colunas de `public.bulas`. Antes de habilitar qualquer escrita, o serviço inspeciona o schema real do PostgreSQL compartilhado.
+
+Execute:
+
+```bash
+uv run python -m bulario_service.smoke_portal_schema
+```
+
+O comando lista somente metadados de schema:
+
+- colunas, tipos, nulabilidade e defaults;
+- constraints;
+- índices;
+- presença dos campos centrais já conhecidos do contrato.
+
+Ele não lê conteúdo de bulas e não escreve em `public.bulas`.
+
+A saída termina com:
+
+```text
+public_bulas_written=0
+```
+
+O resultado desse smoke é a fonte de verdade para implementar o adapter SQL do publisher no próximo incremento. Isso evita inventar aliases, tipos ou regras de unicidade que não estejam no contrato consumidor real.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
