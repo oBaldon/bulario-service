@@ -37,7 +37,13 @@ from bulario_service.retry_policy import (
 BATCH_MODE = "batch"
 FULL_MODE = "full"
 INCREMENTAL_MODE = "incremental"
-_ALLOWED_MODES = {BATCH_MODE, FULL_MODE, INCREMENTAL_MODE}
+RECONCILIATION_MODE = "reconciliation"
+_ALLOWED_MODES = {
+    BATCH_MODE,
+    FULL_MODE,
+    INCREMENTAL_MODE,
+    RECONCILIATION_MODE,
+}
 PRODUCT_SOURCE_PREFIX = "anvisa-product:"
 
 

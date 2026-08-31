@@ -283,3 +283,113 @@ def test_incremental_resume_rejects_window_overrides(
     assert code == 4
     assert called is False
     assert "janela persistida" in capsys.readouterr().err
+
+
+
+def test_reconcile_parser_has_safe_operational_defaults() -> None:
+    args = build_parser().parse_args([
+        "reconcile",
+        "--period-start",
+        "2026-01-01T00:00:00.000Z",
+        "--period-end",
+        "2026-08-31T23:59:59.999Z",
+    ])
+
+    assert args.command == "reconcile"
+    assert args.max_pages == 5
+    assert args.max_products == 20
+    assert args.page_size is None
+    assert args.max_product_retries == 2
+    assert args.retry_backoff_seconds == 2.0
+    assert args.resume is None
+
+
+def test_reconcile_parser_accepts_resume_without_window() -> None:
+    args = build_parser().parse_args([
+        "reconcile",
+        "--resume",
+        "42",
+        "--max-products",
+        "10",
+    ])
+
+    assert args.resume == 42
+    assert args.period_start is None
+    assert args.period_end is None
+    assert args.max_products == 10
+
+
+def test_new_reconciliation_requires_explicit_window(
+    monkeypatch,
+    capsys,
+) -> None:
+    called = False
+
+    def execute(**kwargs):
+        nonlocal called
+        called = True
+        return result(mode="reconciliation")
+
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_reconciliation_sync",
+        execute,
+    )
+
+    args = build_parser().parse_args(["reconcile"])
+    code = run_cli(args)
+
+    assert code == 4
+    assert called is False
+    assert "--period-start and --period-end" in capsys.readouterr().err
+
+
+def test_reconciliation_cli_accepts_paused_result(
+    monkeypatch,
+    capsys,
+) -> None:
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_reconciliation_sync",
+        lambda **kwargs: result(
+            status="paused",
+            mode="reconciliation",
+        ),
+    )
+
+    args = build_parser().parse_args([
+        "reconcile",
+        "--period-start",
+        "2026-01-01T00:00:00.000Z",
+        "--period-end",
+        "2026-08-31T23:59:59.999Z",
+    ])
+
+    code = run_cli(args)
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "Reconciliation sync:" in output
+    assert "run_status=paused" in output
+    assert "run_mode=reconciliation" in output
+    assert "reconciliation_sync_ready=true" in output
+
+
+def test_reconciliation_cli_returns_error_with_failed_items(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_reconciliation_sync",
+        lambda **kwargs: result(
+            status="failed",
+            failed=1,
+            mode="reconciliation",
+        ),
+    )
+
+    args = build_parser().parse_args([
+        "reconcile",
+        "--period-start",
+        "2026-01-01T00:00:00.000Z",
+        "--period-end",
+        "2026-08-31T23:59:59.999Z",
+    ])
+
+    assert run_cli(args) == 2

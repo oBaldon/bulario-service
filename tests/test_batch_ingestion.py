@@ -871,3 +871,87 @@ def test_legacy_failed_item_can_be_reconstructed_for_resume() -> None:
     assert restored.product_name == "Produto 4729"
     assert restored.registration_number == "4729"
     assert restored.raw_payload == raw
+
+
+
+def test_reconciliation_mode_is_persisted_and_resumable(
+    monkeypatch,
+) -> None:
+    session = FakeSession()
+    install_batch_fakes(monkeypatch, session)
+    connector = FakeConnector([
+        [product(10)],
+        [product(20)],
+    ])
+
+    first = run_batch_ingestion(
+        session,
+        connector=connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start="2026-01-01T00:00:00.000Z",
+        period_end="2026-08-31T23:59:59.999Z",
+        page_size=1,
+        max_pages=1,
+        run_mode="reconciliation",
+    )
+
+    assert first.run_status == "paused"
+    assert first.run_mode == "reconciliation"
+    assert session.runs[first.run_id].mode == "reconciliation"
+
+    resumed = run_batch_ingestion(
+        session,
+        connector=connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start=None,
+        period_end=None,
+        page_size=None,
+        max_pages=None,
+        resume_run_id=first.run_id,
+        run_mode="reconciliation",
+    )
+
+    assert resumed.run_id == first.run_id
+    assert resumed.run_status == "completed"
+    assert resumed.start_page == 2
+
+
+def test_reconciliation_run_cannot_be_resumed_as_incremental(
+    monkeypatch,
+) -> None:
+    session = FakeSession()
+    install_batch_fakes(monkeypatch, session)
+    connector = FakeConnector([
+        [product(10)],
+        [product(20)],
+    ])
+
+    first = run_batch_ingestion(
+        session,
+        connector=connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start="2026-01-01T00:00:00.000Z",
+        period_end="2026-08-31T23:59:59.999Z",
+        page_size=1,
+        max_pages=1,
+        run_mode="reconciliation",
+    )
+
+    with pytest.raises(BatchIngestionError, match="requested resume"):
+        run_batch_ingestion(
+            session,
+            connector=connector,
+            downloader=SimpleNamespace(),
+            storage=SimpleNamespace(),
+            extractor=SimpleNamespace(),
+            period_start=None,
+            period_end=None,
+            resume_run_id=first.run_id,
+            run_mode="incremental",
+        )

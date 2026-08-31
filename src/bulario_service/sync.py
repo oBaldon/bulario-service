@@ -14,6 +14,7 @@ from bulario_service.anvisa_transport_probe import DEFAULT_PROFILE_DIR
 from bulario_service.batch_ingestion import (
     FULL_MODE,
     INCREMENTAL_MODE,
+    RECONCILIATION_MODE,
     BatchIngestionError,
     BatchIngestionResult,
     run_batch_ingestion,
@@ -191,6 +192,68 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Executa o bootstrap com Google Chrome visível.",
     )
+
+    reconcile = subparsers.add_parser(
+        "reconcile",
+        help="Executa uma varredura ampla de reconciliação.",
+    )
+    reconcile.add_argument("--period-start")
+    reconcile.add_argument("--period-end")
+    reconcile.add_argument(
+        "--resume",
+        type=int,
+        default=None,
+        metavar="RUN_ID",
+        help="Retoma um run de reconciliação pausado.",
+    )
+    reconcile.add_argument(
+        "--page-size",
+        type=int,
+        default=None,
+        help=(
+            "Quantidade solicitada por página. Novo run usa 10 quando "
+            "omitido; resume reutiliza o valor persistido."
+        ),
+    )
+    reconcile.add_argument(
+        "--max-pages",
+        type=int,
+        default=5,
+        help="Máximo de páginas consultadas nesta invocação.",
+    )
+    reconcile.add_argument(
+        "--max-products",
+        type=int,
+        default=20,
+        help="Máximo de produtos processados nesta invocação.",
+    )
+    reconcile.add_argument(
+        "--max-product-retries",
+        type=int,
+        default=2,
+        help="Máximo de retries operacionais por produto no mesmo run.",
+    )
+    reconcile.add_argument(
+        "--retry-backoff-seconds",
+        type=float,
+        default=2.0,
+        help="Espera entre retries operacionais de produto.",
+    )
+    reconcile.add_argument(
+        "--profile-dir",
+        type=Path,
+        default=DEFAULT_PROFILE_DIR,
+    )
+    reconcile.add_argument(
+        "--storage-root",
+        type=Path,
+        default=None,
+    )
+    reconcile.add_argument(
+        "--headed",
+        action="store_true",
+        help="Executa o bootstrap com Google Chrome visível.",
+    )
     return parser
 
 
@@ -324,6 +387,106 @@ def execute_incremental_sync(
                 return result, window
     finally:
         engine.dispose()
+
+
+
+def execute_reconciliation_sync(
+    *,
+    period_start: str | None,
+    period_end: str | None,
+    resume_run_id: int | None,
+    page_size: int | None,
+    max_pages: int | None,
+    max_products: int | None,
+    max_product_retries: int,
+    retry_backoff_seconds: float,
+    profile_dir: Path,
+    storage_root: Path | None,
+    headed: bool,
+) -> BatchIngestionResult:
+    settings = load_settings()
+    engine = create_database_engine(settings)
+    try:
+        effective_storage_root = storage_root or settings.storage_root
+
+        bootstrap = AnvisaBrowserSessionBootstrap(
+            profile_dir=profile_dir,
+            headless=not headed,
+        )
+        session_state = bootstrap.bootstrap()
+        print("Browser session bootstrap: OK")
+        print("Browser closed. Starting reconciliation sync...")
+
+        storage = LocalDocumentStorage(effective_storage_root)
+        extractor = PdfTextExtractor()
+
+        with AnvisaAuthenticatedHttpClient(session_state) as authenticated:
+            connector = AnvisaBularioConnector(client=authenticated.client)
+            downloader = AnvisaDocumentDownloader(authenticated.client)
+
+            with Session(engine) as db_session:
+                return run_batch_ingestion(
+                    db_session,
+                    connector=connector,
+                    downloader=downloader,
+                    storage=storage,
+                    extractor=extractor,
+                    period_start=period_start,
+                    period_end=period_end,
+                    page_size=page_size,
+                    max_pages=max_pages,
+                    max_products=max_products,
+                    resume_run_id=resume_run_id,
+                    run_mode=RECONCILIATION_MODE,
+                    max_product_retries=max_product_retries,
+                    retry_backoff_seconds=retry_backoff_seconds,
+                )
+    finally:
+        engine.dispose()
+
+
+def print_reconciliation_result(result: BatchIngestionResult) -> None:
+    print(
+        "Reconciliation sync: "
+        f"run_id={result.run_id} "
+        f"run_status={result.run_status} "
+        f"run_mode={result.run_mode} "
+        f"period_start={result.period_start} "
+        f"period_end={result.period_end} "
+        f"resumed={str(result.resumed).lower()} "
+        f"start_page={result.start_page} "
+        f"last_completed_page={result.last_completed_page} "
+        f"pages_fetched={result.pages_fetched} "
+        f"source_total_elements={result.source_total_elements or 0} "
+        f"discovered={result.discovered_count} "
+        f"duplicates={result.duplicate_count} "
+        f"skipped_terminal={result.skipped_terminal_count} "
+        f"processed={result.processed_count} "
+        f"ready={result.ready_count} "
+        f"failed={result.failed_count} "
+        f"retries={result.retry_count} "
+        f"duration_seconds={result.invocation_duration_seconds:.3f} "
+        f"stopped_by_page_limit="
+        f"{str(result.stopped_by_page_limit).lower()} "
+        f"stopped_by_product_limit="
+        f"{str(result.stopped_by_product_limit).lower()} "
+        f"stopped_by_source_blocked="
+        f"{str(result.stopped_by_source_blocked).lower()}"
+    )
+
+    for item in result.items:
+        print(
+            "Reconciliation item "
+            f"source_product_id={item.source_product_id} "
+            f"status={item.status} "
+            f"item_id={item.item_id or '-'} "
+            f"source_document_id={item.source_document_id or '-'} "
+            f"publish_action={item.publish_action or '-'} "
+            f"public_row_id={item.public_row_id or '-'} "
+            f"error_code={item.error_code or '-'} "
+            f"error_class={item.error_class or '-'} "
+            f"retries={item.retry_count}"
+        )
 
 
 def print_incremental_result(
@@ -522,6 +685,51 @@ def run_cli(args: argparse.Namespace) -> int:
         if result.failed_count:
             return 2
         print("incremental_sync_ready=true")
+        return 0
+
+    if args.command == "reconcile":
+        if args.resume is None and (
+            not args.period_start or not args.period_end
+        ):
+            print(
+                "Reconciliation sync failed: --period-start and --period-end "
+                "are required for a new reconciliation run.",
+                file=sys.stderr,
+            )
+            return 4
+
+        try:
+            result = execute_reconciliation_sync(
+                period_start=args.period_start,
+                period_end=args.period_end,
+                resume_run_id=args.resume,
+                page_size=args.page_size,
+                max_pages=args.max_pages,
+                max_products=args.max_products,
+                max_product_retries=args.max_product_retries,
+                retry_backoff_seconds=args.retry_backoff_seconds,
+                profile_dir=args.profile_dir,
+                storage_root=args.storage_root,
+                headed=args.headed,
+            )
+        except (
+            AnvisaSourceError,
+            DocumentStorageError,
+            DocumentTextExtractionError,
+            OperationalPersistenceError,
+            BulaPublicationContractError,
+            BulaPublicationError,
+            BatchIngestionError,
+            RuntimeError,
+            ValueError,
+        ) as exc:
+            print(f"Reconciliation sync failed: {exc}", file=sys.stderr)
+            return 2
+
+        print_reconciliation_result(result)
+        if result.failed_count:
+            return 2
+        print("reconciliation_sync_ready=true")
         return 0
 
     raise ValueError(f"unsupported command: {args.command}")

@@ -1332,6 +1332,101 @@ Se houver um item transitório pendente no run, ele é tentado antes das próxim
 
 Um retry recuperado deve aparecer como `status=ready` e `retries>0`. Falhas permanentes ou conflitos permanecem `failed`. Um bloqueio de sessão causa pausa controlada.
 
+## Sprint 02 - Etapa 29: reconciliation
+
+A CLI operacional passa a expor um modo separado para varreduras amplas:
+
+```bash
+python -m bulario_service.sync reconcile
+```
+
+O reconciliation não substitui o incremental. Ele existe para executar uma janela temporal mais ampla e reencontrar produtos/versões que possam ter sido perdidos por indisponibilidade temporária da fonte, alteração de paginação ou outra lacuna operacional.
+
+O run é persistido como:
+
+```text
+mode=reconciliation
+```
+
+e só pode ser retomado pelo mesmo modo.
+
+### Janela explícita
+
+A periodicidade e a abrangência definitiva do reconciliation ainda não estão homologadas. Por isso, esta etapa não inventa uma janela automática.
+
+Um novo run exige:
+
+```text
+--period-start
+--period-end
+```
+
+Exemplo:
+
+```bash
+uv run python -m bulario_service.sync reconcile \
+  --period-start 2026-08-01T00:00:00.000Z \
+  --period-end 2026-08-31T23:59:59.999Z \
+  --page-size 5 \
+  --max-pages 2 \
+  --max-products 10 \
+  --headed
+```
+
+O objetivo operacional é que produtos/versões já presentes atravessem o pipeline de forma idempotente e terminem com:
+
+```text
+publish_action=unchanged
+```
+
+Enquanto uma versão válida realmente ausente pode resultar em:
+
+```text
+publish_action=inserted
+```
+
+O reconciliation não cria uma semântica especial de sobrescrita nem relaxa regras de conflito.
+
+### Guardrails e resume
+
+Os defaults conservadores por invocação são:
+
+```text
+max_pages=5
+max_products=20
+max_product_retries=2
+retry_backoff_seconds=2
+```
+
+Quando um limite é atingido, o run fica `paused` e pode ser retomado:
+
+```bash
+uv run python -m bulario_service.sync reconcile \
+  --resume RUN_ID \
+  --max-pages 2 \
+  --max-products 10 \
+  --headed
+```
+
+O mesmo `run_id`, janela, `page_size`, checkpoint e política de retry continuam sendo reutilizados.
+
+### Critério desta etapa
+
+A reconciliação é considerada operacionalmente comprovada quando uma janela mais ampla que o incremental normal consegue:
+
+```text
+descobrir múltiplas páginas
+reprocessar registros conhecidos sem duplicação
+publicar somente versões realmente ausentes
+preservar conflitos
+pausar e retomar pelo mesmo run
+usar retry para falhas transitórias
+```
+
+Nenhuma migration adicional é necessária nesta etapa.
+
+Operational lock, observabilidade estruturada e scheduler continuam reservados às etapas seguintes da Sprint 02.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
