@@ -1427,6 +1427,85 @@ Nenhuma migration adicional é necessária nesta etapa.
 
 Operational lock, observabilidade estruturada e scheduler continuam reservados às etapas seguintes da Sprint 02.
 
+## Sprint 02 - Etapa 30: operational lock
+
+Os comandos operacionais oficiais:
+
+```text
+full
+incremental
+reconcile
+```
+
+passam a compartilhar um único PostgreSQL advisory lock global:
+
+```text
+bulario-service:sync:global:v1
+```
+
+Nesta etapa os três modos são tratados como incompatíveis entre si por padrão. Se qualquer um deles já estiver executando, uma segunda sincronização falha rapidamente em vez de aguardar indefinidamente.
+
+### Por que o lock é session-level
+
+O coordinator faz vários `commit`s durante a ingestão. Portanto, um `pg_advisory_xact_lock` seria liberado no primeiro commit e não protegeria a execução inteira.
+
+O serviço usa uma conexão PostgreSQL dedicada e mantém um lock de sessão durante toda a operação:
+
+```text
+pg_try_advisory_lock(...)
+```
+
+A conexão do lock é separada das sessões/transações usadas pelo pipeline.
+
+Ao final, inclusive quando o corpo da operação falha, o serviço executa:
+
+```text
+pg_advisory_unlock(...)
+```
+
+e fecha a conexão dedicada.
+
+### Falha rápida e exit code
+
+Quando o lock já está ocupado, a CLI não abre o Chrome e retorna:
+
+```text
+exit code 3
+```
+
+com mensagem semelhante a:
+
+```text
+Incremental sync blocked: another incompatible bulario sync is already running
+```
+
+Os demais exit codes permanecem com a semântica atual.
+
+### Smoke real do lock
+
+Existe um smoke sem ingestão e sem navegador:
+
+```bash
+uv run python -m bulario_service.smoke_operational_lock \
+  --hold-seconds 20
+```
+
+Enquanto o primeiro processo mantém o lock, uma segunda execução do mesmo smoke deve retornar rapidamente:
+
+```text
+operational_lock_acquired=false
+```
+
+Depois da liberação, uma nova execução deve conseguir adquirir o lock novamente.
+
+Esse smoke usa exatamente a mesma chave global dos comandos `full`, `incremental` e `reconcile`.
+
+### Escopo desta etapa
+
+Não há migration nova e não há Redis.
+
+Esta etapa não implementa scheduler nem observabilidade estruturada. O objetivo é somente impedir concorrência operacional incompatível e comprovar liberação segura do lock.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.

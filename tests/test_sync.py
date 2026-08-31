@@ -1,8 +1,10 @@
 from argparse import Namespace
 from pathlib import Path
 
+import pytest
+
 from bulario_service.batch_ingestion import BatchIngestionResult
-from bulario_service.sync import build_parser, run_cli
+from bulario_service.sync import build_parser, execute_full_sync, run_cli
 
 
 def result(*, status="paused", failed=0, mode="full"):
@@ -393,3 +395,155 @@ def test_reconciliation_cli_returns_error_with_failed_items(
     ])
 
     assert run_cli(args) == 2
+
+
+
+def test_full_cli_returns_three_when_operational_lock_is_busy(
+    monkeypatch,
+    capsys,
+) -> None:
+    from bulario_service.operational_lock import (
+        OperationalLockUnavailableError,
+    )
+
+    def blocked(**kwargs):
+        raise OperationalLockUnavailableError("already running")
+
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_full_sync",
+        blocked,
+    )
+
+    args = build_parser().parse_args([
+        "full",
+        "--period-start",
+        "2026-01-01T00:00:00.000Z",
+        "--period-end",
+        "2026-08-31T23:59:59.999Z",
+    ])
+
+    assert run_cli(args) == 3
+    assert "Full sync blocked" in capsys.readouterr().err
+
+
+def test_incremental_cli_returns_three_when_operational_lock_is_busy(
+    monkeypatch,
+    capsys,
+) -> None:
+    from bulario_service.operational_lock import (
+        OperationalLockUnavailableError,
+    )
+
+    def blocked(**kwargs):
+        raise OperationalLockUnavailableError("already running")
+
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_incremental_sync",
+        blocked,
+    )
+
+    args = build_parser().parse_args([
+        "incremental",
+        "--period-end",
+        "2026-08-31T23:59:59.999Z",
+    ])
+
+    assert run_cli(args) == 3
+    assert "Incremental sync blocked" in capsys.readouterr().err
+
+
+def test_reconciliation_cli_returns_three_when_operational_lock_is_busy(
+    monkeypatch,
+    capsys,
+) -> None:
+    from bulario_service.operational_lock import (
+        OperationalLockUnavailableError,
+    )
+
+    def blocked(**kwargs):
+        raise OperationalLockUnavailableError("already running")
+
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_reconciliation_sync",
+        blocked,
+    )
+
+    args = build_parser().parse_args([
+        "reconcile",
+        "--period-start",
+        "2026-08-01T00:00:00.000Z",
+        "--period-end",
+        "2026-08-31T23:59:59.999Z",
+    ])
+
+    assert run_cli(args) == 3
+    assert "Reconciliation sync blocked" in capsys.readouterr().err
+
+
+
+def test_full_executor_checks_lock_before_browser_bootstrap(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from bulario_service.operational_lock import (
+        OperationalLockUnavailableError,
+    )
+
+    class FakeEngine:
+        def __init__(self):
+            self.disposed = False
+
+        def dispose(self):
+            self.disposed = True
+
+    engine = FakeEngine()
+
+    monkeypatch.setattr(
+        "bulario_service.sync.load_settings",
+        lambda: SimpleNamespace(
+            storage_root=tmp_path,
+        ),
+    )
+    monkeypatch.setattr(
+        "bulario_service.sync.create_database_engine",
+        lambda settings: engine,
+    )
+
+    @contextmanager
+    def blocked_lock(engine_arg, *, mode):
+        raise OperationalLockUnavailableError("already running")
+        yield
+
+    monkeypatch.setattr(
+        "bulario_service.sync.operational_sync_lock",
+        blocked_lock,
+    )
+    monkeypatch.setattr(
+        "bulario_service.sync.AnvisaBrowserSessionBootstrap",
+        lambda **kwargs: pytest.fail(
+            "browser must not start while lock is busy"
+        ),
+    )
+
+    with pytest.raises(
+        OperationalLockUnavailableError,
+        match="already running",
+    ):
+        execute_full_sync(
+            period_start="2026-08-01T00:00:00.000Z",
+            period_end="2026-08-31T23:59:59.999Z",
+            resume_run_id=None,
+            page_size=1,
+            max_pages=1,
+            max_products=1,
+            max_product_retries=2,
+            retry_backoff_seconds=0,
+            profile_dir=tmp_path,
+            storage_root=tmp_path,
+            headed=True,
+        )
+
+    assert engine.disposed is True

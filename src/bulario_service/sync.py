@@ -34,6 +34,10 @@ from bulario_service.incremental import (
     IncrementalWindowError,
     resolve_incremental_window,
 )
+from bulario_service.operational_lock import (
+    OperationalLockUnavailableError,
+    operational_sync_lock,
+)
 from bulario_service.operational_persistence import OperationalPersistenceError
 from bulario_service.publication_contract import BulaPublicationContractError
 from bulario_service.publication_publisher import BulaPublicationError
@@ -274,40 +278,41 @@ def execute_full_sync(
     settings = load_settings()
     engine = create_database_engine(settings)
     try:
-        effective_storage_root = storage_root or settings.storage_root
+        with operational_sync_lock(engine, mode=FULL_MODE):
+            effective_storage_root = storage_root or settings.storage_root
 
-        bootstrap = AnvisaBrowserSessionBootstrap(
-            profile_dir=profile_dir,
-            headless=not headed,
-        )
-        session_state = bootstrap.bootstrap()
-        print("Browser session bootstrap: OK")
-        print("Browser closed. Starting full sync...")
+            bootstrap = AnvisaBrowserSessionBootstrap(
+                profile_dir=profile_dir,
+                headless=not headed,
+            )
+            session_state = bootstrap.bootstrap()
+            print("Browser session bootstrap: OK")
+            print("Browser closed. Starting full sync...")
 
-        storage = LocalDocumentStorage(effective_storage_root)
-        extractor = PdfTextExtractor()
+            storage = LocalDocumentStorage(effective_storage_root)
+            extractor = PdfTextExtractor()
 
-        with AnvisaAuthenticatedHttpClient(session_state) as authenticated:
-            connector = AnvisaBularioConnector(client=authenticated.client)
-            downloader = AnvisaDocumentDownloader(authenticated.client)
+            with AnvisaAuthenticatedHttpClient(session_state) as authenticated:
+                connector = AnvisaBularioConnector(client=authenticated.client)
+                downloader = AnvisaDocumentDownloader(authenticated.client)
 
-            with Session(engine) as db_session:
-                return run_batch_ingestion(
-                    db_session,
-                    connector=connector,
-                    downloader=downloader,
-                    storage=storage,
-                    extractor=extractor,
-                    period_start=period_start,
-                    period_end=period_end,
-                    page_size=page_size,
-                    max_pages=max_pages,
-                    max_products=max_products,
-                    resume_run_id=resume_run_id,
-                    run_mode=FULL_MODE,
-                    max_product_retries=max_product_retries,
-                    retry_backoff_seconds=retry_backoff_seconds,
-                )
+                with Session(engine) as db_session:
+                    return run_batch_ingestion(
+                        db_session,
+                        connector=connector,
+                        downloader=downloader,
+                        storage=storage,
+                        extractor=extractor,
+                        period_start=period_start,
+                        period_end=period_end,
+                        page_size=page_size,
+                        max_pages=max_pages,
+                        max_products=max_products,
+                        resume_run_id=resume_run_id,
+                        run_mode=FULL_MODE,
+                        max_product_retries=max_product_retries,
+                        retry_backoff_seconds=retry_backoff_seconds,
+                    )
     finally:
         engine.dispose()
 
@@ -330,61 +335,62 @@ def execute_incremental_sync(
     settings = load_settings()
     engine = create_database_engine(settings)
     try:
-        effective_storage_root = storage_root or settings.storage_root
-        effective_overlap = (
-            overlap_days
-            if overlap_days is not None
-            else settings.incremental_overlap_days
-        )
+        with operational_sync_lock(engine, mode=INCREMENTAL_MODE):
+            effective_storage_root = storage_root or settings.storage_root
+            effective_overlap = (
+                overlap_days
+                if overlap_days is not None
+                else settings.incremental_overlap_days
+            )
 
-        if resume_run_id is None:
-            with Session(engine) as window_session:
-                window = resolve_incremental_window(
-                    window_session,
-                    overlap_days=effective_overlap,
-                    period_end=period_end,
-                    initial_period_start=initial_period_start,
-                )
-            resolved_start = window.period_start
-            resolved_end = window.period_end
-        else:
-            window = None
-            resolved_start = None
-            resolved_end = None
+            if resume_run_id is None:
+                with Session(engine) as window_session:
+                    window = resolve_incremental_window(
+                        window_session,
+                        overlap_days=effective_overlap,
+                        period_end=period_end,
+                        initial_period_start=initial_period_start,
+                    )
+                resolved_start = window.period_start
+                resolved_end = window.period_end
+            else:
+                window = None
+                resolved_start = None
+                resolved_end = None
 
-        bootstrap = AnvisaBrowserSessionBootstrap(
-            profile_dir=profile_dir,
-            headless=not headed,
-        )
-        session_state = bootstrap.bootstrap()
-        print("Browser session bootstrap: OK")
-        print("Browser closed. Starting incremental sync...")
+            bootstrap = AnvisaBrowserSessionBootstrap(
+                profile_dir=profile_dir,
+                headless=not headed,
+            )
+            session_state = bootstrap.bootstrap()
+            print("Browser session bootstrap: OK")
+            print("Browser closed. Starting incremental sync...")
 
-        storage = LocalDocumentStorage(effective_storage_root)
-        extractor = PdfTextExtractor()
+            storage = LocalDocumentStorage(effective_storage_root)
+            extractor = PdfTextExtractor()
 
-        with AnvisaAuthenticatedHttpClient(session_state) as authenticated:
-            connector = AnvisaBularioConnector(client=authenticated.client)
-            downloader = AnvisaDocumentDownloader(authenticated.client)
+            with AnvisaAuthenticatedHttpClient(session_state) as authenticated:
+                connector = AnvisaBularioConnector(client=authenticated.client)
+                downloader = AnvisaDocumentDownloader(authenticated.client)
 
-            with Session(engine) as db_session:
-                result = run_batch_ingestion(
-                    db_session,
-                    connector=connector,
-                    downloader=downloader,
-                    storage=storage,
-                    extractor=extractor,
-                    period_start=resolved_start,
-                    period_end=resolved_end,
-                    page_size=page_size,
-                    max_pages=max_pages,
-                    max_products=max_products,
-                    resume_run_id=resume_run_id,
-                    run_mode=INCREMENTAL_MODE,
-                    max_product_retries=max_product_retries,
-                    retry_backoff_seconds=retry_backoff_seconds,
-                )
-                return result, window
+                with Session(engine) as db_session:
+                    result = run_batch_ingestion(
+                        db_session,
+                        connector=connector,
+                        downloader=downloader,
+                        storage=storage,
+                        extractor=extractor,
+                        period_start=resolved_start,
+                        period_end=resolved_end,
+                        page_size=page_size,
+                        max_pages=max_pages,
+                        max_products=max_products,
+                        resume_run_id=resume_run_id,
+                        run_mode=INCREMENTAL_MODE,
+                        max_product_retries=max_product_retries,
+                        retry_backoff_seconds=retry_backoff_seconds,
+                    )
+                    return result, window
     finally:
         engine.dispose()
 
@@ -407,40 +413,41 @@ def execute_reconciliation_sync(
     settings = load_settings()
     engine = create_database_engine(settings)
     try:
-        effective_storage_root = storage_root or settings.storage_root
+        with operational_sync_lock(engine, mode=RECONCILIATION_MODE):
+            effective_storage_root = storage_root or settings.storage_root
 
-        bootstrap = AnvisaBrowserSessionBootstrap(
-            profile_dir=profile_dir,
-            headless=not headed,
-        )
-        session_state = bootstrap.bootstrap()
-        print("Browser session bootstrap: OK")
-        print("Browser closed. Starting reconciliation sync...")
+            bootstrap = AnvisaBrowserSessionBootstrap(
+                profile_dir=profile_dir,
+                headless=not headed,
+            )
+            session_state = bootstrap.bootstrap()
+            print("Browser session bootstrap: OK")
+            print("Browser closed. Starting reconciliation sync...")
 
-        storage = LocalDocumentStorage(effective_storage_root)
-        extractor = PdfTextExtractor()
+            storage = LocalDocumentStorage(effective_storage_root)
+            extractor = PdfTextExtractor()
 
-        with AnvisaAuthenticatedHttpClient(session_state) as authenticated:
-            connector = AnvisaBularioConnector(client=authenticated.client)
-            downloader = AnvisaDocumentDownloader(authenticated.client)
+            with AnvisaAuthenticatedHttpClient(session_state) as authenticated:
+                connector = AnvisaBularioConnector(client=authenticated.client)
+                downloader = AnvisaDocumentDownloader(authenticated.client)
 
-            with Session(engine) as db_session:
-                return run_batch_ingestion(
-                    db_session,
-                    connector=connector,
-                    downloader=downloader,
-                    storage=storage,
-                    extractor=extractor,
-                    period_start=period_start,
-                    period_end=period_end,
-                    page_size=page_size,
-                    max_pages=max_pages,
-                    max_products=max_products,
-                    resume_run_id=resume_run_id,
-                    run_mode=RECONCILIATION_MODE,
-                    max_product_retries=max_product_retries,
-                    retry_backoff_seconds=retry_backoff_seconds,
-                )
+                with Session(engine) as db_session:
+                    return run_batch_ingestion(
+                        db_session,
+                        connector=connector,
+                        downloader=downloader,
+                        storage=storage,
+                        extractor=extractor,
+                        period_start=period_start,
+                        period_end=period_end,
+                        page_size=page_size,
+                        max_pages=max_pages,
+                        max_products=max_products,
+                        resume_run_id=resume_run_id,
+                        run_mode=RECONCILIATION_MODE,
+                        max_product_retries=max_product_retries,
+                        retry_backoff_seconds=retry_backoff_seconds,
+                    )
     finally:
         engine.dispose()
 
@@ -617,6 +624,9 @@ def run_cli(args: argparse.Namespace) -> int:
                 storage_root=args.storage_root,
                 headed=args.headed,
             )
+        except OperationalLockUnavailableError as exc:
+            print(f"Full sync blocked: {exc}", file=sys.stderr)
+            return 3
         except (
             AnvisaSourceError,
             DocumentStorageError,
@@ -666,6 +676,9 @@ def run_cli(args: argparse.Namespace) -> int:
                 storage_root=args.storage_root,
                 headed=args.headed,
             )
+        except OperationalLockUnavailableError as exc:
+            print(f"Incremental sync blocked: {exc}", file=sys.stderr)
+            return 3
         except (
             AnvisaSourceError,
             DocumentStorageError,
@@ -712,6 +725,9 @@ def run_cli(args: argparse.Namespace) -> int:
                 storage_root=args.storage_root,
                 headed=args.headed,
             )
+        except OperationalLockUnavailableError as exc:
+            print(f"Reconciliation sync blocked: {exc}", file=sys.stderr)
+            return 3
         except (
             AnvisaSourceError,
             DocumentStorageError,
