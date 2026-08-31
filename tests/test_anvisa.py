@@ -9,6 +9,7 @@ from bulario_service.anvisa import (
     AnvisaBularioConnector,
     AnvisaPayloadError,
     AnvisaSourceError,
+    AnvisaTransientSourceError,
     RequestTrace,
     DEFAULT_DISCOVERY_PAGE_SIZE,
 )
@@ -159,7 +160,7 @@ def test_source_http_500_is_normalized() -> None:
         base_url="https://consultas.anvisa.gov.br",
     )
 
-    with pytest.raises(AnvisaSourceError, match="HTTP 500"):
+    with pytest.raises(AnvisaTransientSourceError, match="HTTP 500"):
         AnvisaBularioConnector(
             client=client,
             max_attempts=1,

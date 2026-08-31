@@ -21,10 +21,11 @@ from bulario_service.ingestion import (
     complete_ingestion_run,
     fail_ingestion_run,
     register_ingestion_item,
+    retry_failed_ingestion_item,
     start_ingestion_run,
     transition_ingestion_item,
 )
-from bulario_service.models import IngestionRun
+from bulario_service.models import IngestionItem, IngestionRun
 from bulario_service.operational_persistence import (
     compute_source_fingerprint,
     persist_operational_version,
@@ -38,6 +39,7 @@ from bulario_service.publication_publisher import (
     PublishResult,
     publish_candidate,
 )
+from bulario_service.retry_policy import classify_exception
 
 
 class E2EPipelineError(RuntimeError):
@@ -143,6 +145,7 @@ def process_discovered_product(
     downloader: AnvisaDocumentDownloader,
     storage: LocalDocumentStorage,
     extractor: PdfTextExtractor,
+    retry_item: IngestionItem | None = None,
     publish: PublishFunction = publish_candidate,
 ) -> ProcessedProductResult:
     """Process one discovered product inside an existing ingestion run."""
@@ -153,25 +156,39 @@ def process_discovered_product(
 
     _validate_discovered_product(product)
 
-    item = register_ingestion_item(
-        session,
-        run,
-        source_record_id=(
-            f"anvisa-product:{product.source_product_id}"
-        ),
-        source_url=SOURCE_URL,
-        raw_payload=product.raw_payload,
-    )
-    session.commit()
-    item_id = _require_id(item.id, "item")
+    source_record_id = f"anvisa-product:{product.source_product_id}"
+    if retry_item is None:
+        item = register_ingestion_item(
+            session,
+            run,
+            source_record_id=source_record_id,
+            source_url=SOURCE_URL,
+            raw_payload=product.raw_payload,
+        )
+        session.commit()
+        item_id = _require_id(item.id, "item")
 
-    try:
         transition_ingestion_item(
             session,
             item,
             to_status=ITEM_STATUS_FETCHING,
         )
         session.commit()
+    else:
+        item = retry_item
+        if item.run_id != run.id:
+            raise E2EPipelineError(
+                "retry item belongs to a different ingestion run"
+            )
+        if item.source_record_id != source_record_id:
+            raise E2EPipelineError(
+                "retry item source_record_id does not match product"
+            )
+        item_id = _require_id(item.id, "item")
+        retry_failed_ingestion_item(session, item)
+        session.commit()
+
+    try:
 
         detail = connector.get_product_detail(product.source_product_id)
         current = _current_version(detail.versions)
@@ -305,12 +322,17 @@ def _mark_item_failed(
         ITEM_STATUS_READY,
         ITEM_STATUS_FAILED,
     }:
+        classification = classify_exception(error)
+        root_error = error
+        while root_error.__cause__ is not None:
+            root_error = root_error.__cause__
         transition_ingestion_item(
             session,
             persisted_item,
             to_status=ITEM_STATUS_FAILED,
-            error_code=type(error).__name__[:64],
-            error_message=str(error)[:2000],
+            error_code=type(root_error).__name__[:64],
+            error_message=str(root_error)[:2000],
+            error_class=classification.error_class,
         )
 
     session.commit()

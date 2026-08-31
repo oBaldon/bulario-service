@@ -16,10 +16,18 @@ _REQUEST_HEADERS = {
 
 
 class AnvisaSourceError(RuntimeError):
-    """Raised when the ANVISA source cannot be reached successfully."""
+    """Base error for failures involving the ANVISA source."""
 
 
-class AnvisaPayloadError(AnvisaSourceError):
+class AnvisaTransientSourceError(AnvisaSourceError):
+    """Raised after retryable transport/source failures are exhausted."""
+
+
+class AnvisaPermanentSourceError(AnvisaSourceError):
+    """Raised for non-retryable source responses or invalid source data."""
+
+
+class AnvisaPayloadError(AnvisaPermanentSourceError):
     """Raised when ANVISA returns an unexpected or invalid payload."""
 
 
@@ -274,7 +282,7 @@ class AnvisaBularioConnector:
                 if attempt < self._max_attempts:
                     self._sleep_before_retry(attempt)
                     continue
-                raise AnvisaSourceError(
+                raise AnvisaTransientSourceError(
                     f"ANVISA connect timed out path={path} page={page}"
                 ) from exc
             except httpx.ReadTimeout as exc:
@@ -290,7 +298,7 @@ class AnvisaBularioConnector:
                 if attempt < self._max_attempts:
                     self._sleep_before_retry(attempt)
                     continue
-                raise AnvisaSourceError(
+                raise AnvisaTransientSourceError(
                     f"ANVISA read timed out path={path} page={page}"
                 ) from exc
             except httpx.TimeoutException as exc:
@@ -306,7 +314,7 @@ class AnvisaBularioConnector:
                 if attempt < self._max_attempts:
                     self._sleep_before_retry(attempt)
                     continue
-                raise AnvisaSourceError(
+                raise AnvisaTransientSourceError(
                     f"ANVISA request timed out path={path} page={page}"
                 ) from exc
             except httpx.HTTPError as exc:
@@ -319,7 +327,7 @@ class AnvisaBularioConnector:
                     elapsed_seconds=elapsed,
                     outcome="http_error",
                 )
-                raise AnvisaSourceError(
+                raise AnvisaTransientSourceError(
                     f"ANVISA request failed path={path} page={page}"
                 ) from exc
 
@@ -376,7 +384,12 @@ class AnvisaBularioConnector:
                 elapsed_seconds=elapsed,
                 outcome="http_error",
             )
-            raise AnvisaSourceError(
+            error_type = (
+                AnvisaTransientSourceError
+                if status in {500, 502, 503, 504}
+                else AnvisaPermanentSourceError
+            )
+            raise error_type(
                 f"ANVISA returned HTTP {status} path={path} page={page}"
             )
 

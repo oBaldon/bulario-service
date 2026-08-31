@@ -20,6 +20,7 @@ from bulario_service.ingestion import (
     pause_ingestion_run,
     register_ingestion_item,
     resume_ingestion_run,
+    retry_failed_ingestion_item,
     start_ingestion_run,
     transition_ingestion_item,
 )
@@ -254,3 +255,42 @@ def test_start_run_can_persist_resume_metadata() -> None:
     assert run.period_end == "2026-08-31T23:59:59.999Z"
     assert run.page_size == 25
     assert run.last_completed_page == 0
+
+
+
+def test_retry_failed_item_reopens_same_item_and_increments_counter() -> None:
+    session = Mock()
+    item = IngestionItem(
+        id=56,
+        run_id=8,
+        source_record_id="anvisa-product:4729",
+        status=ITEM_STATUS_FAILED,
+        error_code="AnvisaSourceError",
+        error_message="ANVISA returned HTTP 500",
+        error_class="transient",
+        retry_count=0,
+    )
+
+    retry_failed_ingestion_item(session, item)
+
+    assert item.id == 56
+    assert item.status == ITEM_STATUS_FETCHING
+    assert item.retry_count == 1
+    assert item.error_code is None
+    assert item.error_message is None
+    assert item.error_class is None
+    session.flush.assert_called_once_with()
+
+
+def test_retry_rejects_non_failed_item() -> None:
+    session = Mock()
+    item = IngestionItem(
+        id=56,
+        run_id=8,
+        source_record_id="anvisa-product:4729",
+        status=ITEM_STATUS_READY,
+        retry_count=0,
+    )
+
+    with pytest.raises(ValueError, match="only failed"):
+        retry_failed_ingestion_item(session, item)

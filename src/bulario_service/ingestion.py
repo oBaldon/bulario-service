@@ -146,6 +146,7 @@ def transition_ingestion_item(
     to_status: str,
     error_code: str | None = None,
     error_message: str | None = None,
+    error_class: str | None = None,
 ) -> None:
     allowed = _ITEM_TRANSITIONS.get(item.status)
     if allowed is None:
@@ -161,8 +162,29 @@ def transition_ingestion_item(
             raise ValueError("error_code is required when marking an item as failed")
         item.error_code = error_code
         item.error_message = error_message
-    elif error_code is not None or error_message is not None:
+        item.error_class = error_class
+    elif (
+        error_code is not None
+        or error_message is not None
+        or error_class is not None
+    ):
         raise ValueError("error details are only allowed for failed items")
 
     item.status = to_status
+    session.flush()
+
+
+
+def retry_failed_ingestion_item(
+    session: Session,
+    item: IngestionItem,
+) -> None:
+    if item.status != ITEM_STATUS_FAILED:
+        raise ValueError("only failed ingestion items can be retried")
+
+    item.status = ITEM_STATUS_FETCHING
+    item.retry_count = (item.retry_count or 0) + 1
+    item.error_code = None
+    item.error_message = None
+    item.error_class = None
     session.flush()

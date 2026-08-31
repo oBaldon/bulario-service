@@ -7,7 +7,9 @@ import httpx
 
 from bulario_service.anvisa import (
     AnvisaAccessDeniedError,
+    AnvisaPermanentSourceError,
     AnvisaSourceError,
+    AnvisaTransientSourceError,
 )
 
 
@@ -101,7 +103,7 @@ class AnvisaDocumentDownloader:
                 if attempt < self._max_attempts:
                     self._sleep_before_retry(attempt)
                     continue
-                raise AnvisaSourceError(
+                raise AnvisaTransientSourceError(
                     "ANVISA document connect timed out "
                     f"source_document_id={source_document_id} kind={kind}"
                 ) from exc
@@ -118,7 +120,7 @@ class AnvisaDocumentDownloader:
                 if attempt < self._max_attempts:
                     self._sleep_before_retry(attempt)
                     continue
-                raise AnvisaSourceError(
+                raise AnvisaTransientSourceError(
                     "ANVISA document read timed out "
                     f"source_document_id={source_document_id} kind={kind}"
                 ) from exc
@@ -135,7 +137,7 @@ class AnvisaDocumentDownloader:
                 if attempt < self._max_attempts:
                     self._sleep_before_retry(attempt)
                     continue
-                raise AnvisaSourceError(
+                raise AnvisaTransientSourceError(
                     "ANVISA document request timed out "
                     f"source_document_id={source_document_id} kind={kind}"
                 ) from exc
@@ -149,7 +151,7 @@ class AnvisaDocumentDownloader:
                     elapsed_seconds=elapsed,
                     outcome="http_error",
                 )
-                raise AnvisaSourceError(
+                raise AnvisaTransientSourceError(
                     "ANVISA document request failed "
                     f"source_document_id={source_document_id} kind={kind}"
                 ) from exc
@@ -193,7 +195,12 @@ class AnvisaDocumentDownloader:
                     elapsed_seconds=elapsed,
                     outcome="http_error",
                 )
-                raise AnvisaSourceError(
+                error_type = (
+                    AnvisaTransientSourceError
+                    if status in {500, 502, 503, 504}
+                    else AnvisaPermanentSourceError
+                )
+                raise error_type(
                     f"ANVISA returned HTTP {status} for document "
                     f"source_document_id={source_document_id} kind={kind}"
                 )
@@ -209,7 +216,7 @@ class AnvisaDocumentDownloader:
                     outcome="empty_document",
                     size_bytes=0,
                 )
-                raise AnvisaSourceError(
+                raise AnvisaPermanentSourceError(
                     "ANVISA returned empty document "
                     f"source_document_id={source_document_id} kind={kind}"
                 )
@@ -224,7 +231,7 @@ class AnvisaDocumentDownloader:
                     outcome="invalid_pdf",
                     size_bytes=len(content),
                 )
-                raise AnvisaSourceError(
+                raise AnvisaPermanentSourceError(
                     "ANVISA returned invalid PDF content "
                     f"source_document_id={source_document_id} kind={kind}"
                 )

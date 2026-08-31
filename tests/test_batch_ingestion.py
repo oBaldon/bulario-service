@@ -138,6 +138,14 @@ def install_batch_fakes(monkeypatch, session, *, failing_ids=()):
             len(session.failed_product_ids) if status == "failed" else 0
         ),
     )
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion._load_retryable_failed_items",
+        lambda _session, *, run_id, max_product_retries: (),
+    )
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion._get_product_item",
+        lambda _session, *, run_id, source_product_id: None,
+    )
     return calls
 
 
@@ -642,3 +650,224 @@ def test_invalid_run_mode_is_rejected_before_run_creation(monkeypatch) -> None:
         )
 
     assert session.runs == {}
+
+
+
+def test_incremental_mode_is_persisted_and_resumable(monkeypatch) -> None:
+    session = FakeSession()
+    install_batch_fakes(monkeypatch, session)
+    connector = FakeConnector([
+        [product(10)],
+        [product(20)],
+    ])
+
+    first = run_batch_ingestion(
+        session,
+        connector=connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start="2026-08-24T00:00:00.000Z",
+        period_end="2026-08-31T00:00:00.000Z",
+        page_size=1,
+        max_pages=1,
+        run_mode="incremental",
+    )
+
+    assert first.run_status == "paused"
+    assert first.run_mode == "incremental"
+    assert first.period_start == "2026-08-24T00:00:00.000Z"
+    assert session.runs[first.run_id].mode == "incremental"
+
+    resumed = run_batch_ingestion(
+        session,
+        connector=connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start=None,
+        period_end=None,
+        page_size=None,
+        max_pages=None,
+        resume_run_id=first.run_id,
+        run_mode="incremental",
+    )
+
+    assert resumed.run_id == first.run_id
+    assert resumed.run_status == "completed"
+    assert resumed.run_mode == "incremental"
+    assert resumed.period_end == "2026-08-31T00:00:00.000Z"
+
+
+
+def test_transient_product_failure_retries_same_item_and_recovers(
+    monkeypatch,
+) -> None:
+    from bulario_service.anvisa import AnvisaTransientSourceError
+    from bulario_service.models import IngestionItem
+
+    session = FakeSession()
+    connector = FakeConnector([[product(4729)]])
+    item = IngestionItem(
+        id=56,
+        run_id=1,
+        source_record_id="anvisa-product:4729",
+        status="failed",
+        error_code="AnvisaTransientSourceError",
+        error_message="ANVISA returned HTTP 500",
+        error_class="transient",
+        retry_count=0,
+        raw_payload=product(4729).raw_payload,
+    )
+    calls = []
+
+    def process(_session, *, retry_item=None, product, **kwargs):
+        calls.append(retry_item)
+        if retry_item is None:
+            item.status = "failed"
+            raise AnvisaTransientSourceError(
+                "ANVISA returned HTTP 500 "
+                "path=/api/consulta/bulario/4729 page=2"
+            )
+
+        item.retry_count += 1
+        item.status = "ready"
+        item.error_code = None
+        item.error_message = None
+        item.error_class = None
+        return ProcessedProductResult(
+            item_id=56,
+            source_product_id=4729,
+            source_document_id=35474505,
+            publish_action="inserted",
+            public_row_id=47,
+        )
+
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion.process_discovered_product",
+        process,
+    )
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion._get_product_item",
+        lambda _session, *, run_id, source_product_id: item,
+    )
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion._load_terminal_product_ids",
+        lambda _session, *, run_id: set(),
+    )
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion._count_items_with_status",
+        lambda _session, *, run_id, status: 0,
+    )
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion.time.sleep",
+        lambda seconds: None,
+    )
+
+    result = run_batch_ingestion(
+        session,
+        connector=connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start="2026-08-23T00:00:00.000Z",
+        period_end="2026-08-31T00:00:00.000Z",
+        max_pages=None,
+        max_product_retries=2,
+        retry_backoff_seconds=2.0,
+    )
+
+    assert result.run_status == "completed"
+    assert result.retry_count == 1
+    assert result.ready_count == 1
+    assert result.failed_count == 0
+    assert len(calls) == 2
+    assert calls[0] is None
+    assert calls[1] is item
+
+
+def test_source_blocked_product_pauses_without_blind_retry(
+    monkeypatch,
+) -> None:
+    from bulario_service.anvisa import AnvisaAccessDeniedError
+    from bulario_service.models import IngestionItem
+
+    session = FakeSession()
+    connector = FakeConnector([[product(10), product(20)]])
+    item = IngestionItem(
+        id=110,
+        run_id=1,
+        source_record_id="anvisa-product:10",
+        status="failed",
+        error_code="AnvisaAccessDeniedError",
+        error_message="ANVISA returned HTTP 403",
+        error_class="source_blocked",
+        retry_count=0,
+        raw_payload=product(10).raw_payload,
+    )
+    calls = []
+
+    def process(_session, *, product, **kwargs):
+        calls.append(product.source_product_id)
+        raise AnvisaAccessDeniedError("ANVISA returned HTTP 403")
+
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion.process_discovered_product",
+        process,
+    )
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion._get_product_item",
+        lambda _session, *, run_id, source_product_id: item,
+    )
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion._load_terminal_product_ids",
+        lambda _session, *, run_id: set(),
+    )
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion._count_items_with_status",
+        lambda _session, *, run_id, status: 1,
+    )
+
+    result = run_batch_ingestion(
+        session,
+        connector=connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start="2026-08-23T00:00:00.000Z",
+        period_end="2026-08-31T00:00:00.000Z",
+        max_pages=None,
+    )
+
+    assert result.run_status == "paused"
+    assert result.stopped_by_source_blocked is True
+    assert result.retry_count == 0
+    assert calls == [10]
+
+
+def test_legacy_failed_item_can_be_reconstructed_for_resume() -> None:
+    from bulario_service.batch_ingestion import _product_from_failed_item
+    from bulario_service.models import IngestionItem
+
+    raw = product(4729).raw_payload | {
+        "nomeProduto": "Produto 4729",
+        "numeroRegistro": "4729",
+        "razaoSocial": "Empresa",
+    }
+    item = IngestionItem(
+        id=56,
+        run_id=8,
+        source_record_id="anvisa-product:4729",
+        status="failed",
+        error_code="AnvisaSourceError",
+        error_message="ANVISA returned HTTP 500",
+        retry_count=0,
+        raw_payload=raw,
+    )
+
+    restored = _product_from_failed_item(item)
+
+    assert restored.source_product_id == 4729
+    assert restored.product_name == "Produto 4729"
+    assert restored.registration_number == "4729"
+    assert restored.raw_payload == raw

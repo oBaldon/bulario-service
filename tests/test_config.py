@@ -172,3 +172,41 @@ def test_load_settings_reads_storage_root(
     assert settings.storage_root == Path(
         "../intelireg-data/bulas"
     )
+
+
+
+def test_incremental_overlap_defaults_to_seven_days(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.delenv(
+        "BULARIO_INCREMENTAL_OVERLAP_DAYS",
+        raising=False,
+    )
+
+    settings = load_settings(env_file=tmp_path / ".env")
+
+    assert settings.incremental_overlap_days == 7
+
+
+def test_incremental_overlap_reads_environment(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("BULARIO_INCREMENTAL_OVERLAP_DAYS", "5")
+
+    settings = load_settings(env_file=tmp_path / ".env")
+
+    assert settings.incremental_overlap_days == 5
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "abc"])
+def test_incremental_overlap_rejects_invalid_environment(
+    monkeypatch,
+    tmp_path: Path,
+    value: str,
+) -> None:
+    monkeypatch.setenv("BULARIO_INCREMENTAL_OVERLAP_DAYS", value)
+
+    with pytest.raises(ValueError, match="BULARIO_INCREMENTAL_OVERLAP_DAYS"):
+        load_settings(env_file=tmp_path / ".env")

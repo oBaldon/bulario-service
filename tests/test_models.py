@@ -34,6 +34,13 @@ def test_ingestion_item_keeps_operational_payload_and_fingerprint() -> None:
     assert columns["source_fingerprint"].type.length == 64
 
 
+def test_ingestion_item_keeps_retry_metadata() -> None:
+    columns = IngestionItem.__table__.columns
+
+    assert "error_class" in columns
+    assert "retry_count" in columns
+
+
 def test_source_record_is_unique_within_a_run() -> None:
     constraint_names = {
         constraint.name

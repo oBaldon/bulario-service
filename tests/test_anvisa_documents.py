@@ -5,7 +5,9 @@ import pytest
 
 from bulario_service.anvisa import (
     AnvisaAccessDeniedError,
+    AnvisaPermanentSourceError,
     AnvisaSourceError,
+    AnvisaTransientSourceError,
 )
 from bulario_service.anvisa_documents import (
     AnvisaDocumentDownloader,
@@ -61,7 +63,7 @@ def test_download_rejects_empty_content() -> None:
         base_url="https://consultas.anvisa.gov.br",
     )
 
-    with pytest.raises(AnvisaSourceError, match="empty document"):
+    with pytest.raises(AnvisaPermanentSourceError, match="empty document"):
         AnvisaDocumentDownloader(
             client,
             max_attempts=1,
@@ -83,7 +85,7 @@ def test_download_rejects_non_pdf_content() -> None:
         base_url="https://consultas.anvisa.gov.br",
     )
 
-    with pytest.raises(AnvisaSourceError, match="invalid PDF"):
+    with pytest.raises(AnvisaPermanentSourceError, match="invalid PDF"):
         AnvisaDocumentDownloader(
             client,
             max_attempts=1,
@@ -221,4 +223,27 @@ def test_download_rejects_empty_token_without_request() -> None:
             source_document_id=1,
             kind="patient",
             token="",
+        )
+
+
+
+def test_document_exhausted_500_is_transient() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(500)
+        ),
+        base_url="https://consultas.anvisa.gov.br",
+    )
+
+    with pytest.raises(
+        AnvisaTransientSourceError,
+        match="HTTP 500",
+    ):
+        AnvisaDocumentDownloader(
+            client,
+            max_attempts=1,
+        ).download(
+            source_document_id=123,
+            kind="patient",
+            token="token",
         )

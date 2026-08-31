@@ -11,6 +11,7 @@ class Settings:
     app_env: str
     database_url: str | None
     storage_root: Path = Path("storage")
+    incremental_overlap_days: int = 7
 
 
 def normalize_database_url(database_url: str | None) -> str | None:
@@ -76,6 +77,10 @@ def load_settings(
         storage_root=Path(
             os.getenv("BULARIO_STORAGE_ROOT", "storage")
         ),
+        incremental_overlap_days=_positive_int_env(
+            "BULARIO_INCREMENTAL_OVERLAP_DAYS",
+            default=7,
+        ),
     )
 
 
@@ -91,3 +96,16 @@ def _is_valid_env_key(key: str) -> bool:
     if not (key[0].isalpha() or key[0] == "_"):
         return False
     return all(character.isalnum() or character == "_" for character in key)
+
+
+def _positive_int_env(name: str, *, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer") from exc
+    if value < 1:
+        raise ValueError(f"{name} must be greater than zero")
+    return value

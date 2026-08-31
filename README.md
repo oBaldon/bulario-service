@@ -1127,6 +1127,211 @@ A Etapa 26 considera o full load operacionalmente comprovado quando uma janela s
 
 Incremental, retry avançado, reconciliation, lock e scheduler permanecem fora desta etapa.
 
+## Sprint 02 - Etapa 27: incremental com overlap
+
+A CLI operacional passa a expor:
+
+```bash
+python -m bulario_service.sync incremental
+```
+
+O modo incremental persiste `ingestion_runs.mode = incremental` e reutiliza o mesmo mecanismo de checkpoint/resume do full load.
+
+### Regra da janela
+
+Quando existe um run incremental `completed`, a próxima janela é calculada por:
+
+```text
+period_start = period_end do último incremental completed - overlap
+period_end   = instante UTC atual ou --period-end explícito
+```
+
+Runs `paused` ou `failed` não são usados como âncora para uma nova janela. Um run pausado deve ser retomado com `--resume`.
+
+O overlap é configurável:
+
+```env
+BULARIO_INCREMENTAL_OVERLAP_DAYS=7
+```
+
+O valor `7` é um default técnico inicial, não uma regra regulatória nem um comportamento homologado da ANVISA. Ele deve ser calibrado com evidência operacional.
+
+### Primeira execução incremental
+
+Quando ainda não existe incremental `completed`, o serviço não inventa retrospectiva. É obrigatório informar explicitamente o início inicial:
+
+```bash
+uv run python -m bulario_service.sync incremental \
+  --initial-period-start 2026-08-29T00:00:00.000Z \
+  --period-end 2026-08-30T23:59:59.999Z \
+  --page-size 5 \
+  --max-pages 2 \
+  --max-products 10 \
+  --headed
+```
+
+A saída inclui:
+
+```text
+Incremental window:
+period_start
+period_end
+overlap_days
+based_on_run_id
+
+Incremental sync:
+run_id
+run_status
+run_mode
+period_start
+period_end
+resumed
+start_page
+last_completed_page
+pages_fetched
+source_total_elements
+discovered
+duplicates
+skipped_terminal
+processed
+ready
+failed
+duration_seconds
+```
+
+Se o guardrail for atingido, o run fica `paused`. Continue o mesmo run:
+
+```bash
+uv run python -m bulario_service.sync incremental \
+  --resume RUN_ID \
+  --max-pages 2 \
+  --max-products 10 \
+  --headed
+```
+
+Em `--resume`, não informe `--initial-period-start`, `--period-end` nem `--overlap-days`: a janela persistida é obrigatoriamente reutilizada. `--page-size`, quando informado, ainda precisa coincidir com o valor persistido.
+
+### Incrementais seguintes
+
+Depois que um incremental terminar como `completed`, um novo comando pode omitir `--initial-period-start`:
+
+```bash
+uv run python -m bulario_service.sync incremental \
+  --period-end 2026-08-31T23:59:59.999Z \
+  --max-pages 2 \
+  --max-products 10 \
+  --headed
+```
+
+O serviço encontra o último incremental concluído e aplica o overlap configurado. A sobreposição pode redescobrir produtos já conhecidos; a idempotência do pipeline deve resultar em `unchanged`, enquanto versões realmente novas resultam em `inserted`.
+
+### Segurança operacional
+
+A resolução da janela ocorre antes de abrir o navegador. Assim, configuração inválida ou ausência de `--initial-period-start` na primeira execução falha rapidamente sem iniciar sessão ANVISA.
+
+Esta etapa ainda não implementa retry avançado, reconciliation, advisory lock ou scheduler.
+
+## Sprint 02 - Etapa 28: retry e classificação de falhas
+
+A ingestão passa a distinguir falhas operacionais por classe:
+
+```text
+transient
+source_blocked
+permanent
+conflict
+unknown
+```
+
+### Política
+
+`transient` inclui falhas como timeout e HTTP `500/502/503/504` após esgotar o retry HTTP do adapter. Esses itens podem ser reabertos no mesmo `ingestion_run`, reutilizando o mesmo `ingestion_item`.
+
+`source_blocked` representa rejeição de sessão, como HTTP `403`. O coordinator não faz retry cego na mesma invocação: interrompe o avanço e deixa o run `paused`.
+
+`permanent` cobre payload inválido, resposta HTTP não transitória e documento inválido. Não há retry automático.
+
+`conflict` cobre divergência material em identidade/versionamento/storage/publicação. Não há retry automático.
+
+`unknown` permanece sem retry automático até haver classificação explícita.
+
+### Metadados persistidos
+
+A migration:
+
+```text
+20260831_0005_add_ingestion_retry_metadata
+```
+
+adiciona a `bulario.ingestion_items`:
+
+```text
+error_class
+retry_count
+```
+
+`retry_count` registra quantas reaberturas operacionais já foram feitas para aquele mesmo item. O item não é duplicado.
+
+Antes do uso:
+
+```bash
+uv run alembic upgrade head
+uv run alembic current
+```
+
+### Retry em execução
+
+Além das tentativas HTTP internas do adapter, o coordinator permite retry do pipeline completo do produto:
+
+```text
+--max-product-retries 2
+--retry-backoff-seconds 2
+```
+
+Esses defaults são conservadores e podem ser alterados por invocação.
+
+Quando um produto falha como transitório durante a invocação, o coordinator pode reabrir o mesmo item e tentar novamente. Se o run já estava `paused`, itens transitórios pendentes são tratados antes do discovery continuar.
+
+Isso permite recuperar falhas de páginas que já foram checkpointadas, sem depender de redescobrir aquela página.
+
+### Compatibilidade com falhas anteriores
+
+Itens criados antes desta migration podem ter `error_class = NULL`. Para preservar o histórico, o coordinator reconhece mensagens legadas de timeout e HTTP `500/502/503/504` como transitórias.
+
+Assim, falhas reais anteriores podem ser recuperadas no mesmo run após a migration, desde que ainda estejam dentro do limite de retries.
+
+### Observabilidade da CLI
+
+A saída de `full` e `incremental` passa a incluir:
+
+```text
+retries
+stopped_by_source_blocked
+```
+
+E cada item inclui:
+
+```text
+error_class
+retries
+```
+
+### Exemplo de resume incremental
+
+```bash
+uv run python -m bulario_service.sync incremental \
+  --resume RUN_ID \
+  --max-pages 2 \
+  --max-products 10 \
+  --max-product-retries 2 \
+  --retry-backoff-seconds 2 \
+  --headed
+```
+
+Se houver um item transitório pendente no run, ele é tentado antes das próximas páginas.
+
+Um retry recuperado deve aparecer como `status=ready` e `retries>0`. Falhas permanentes ou conflitos permanecem `failed`. Um bloqueio de sessão causa pausa controlada.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
