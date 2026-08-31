@@ -1603,6 +1603,210 @@ Não há migration nova.
 
 Prometheus, Grafana, tracing distribuído ou infraestrutura externa de logging não são requisitos desta etapa. As linhas JSON podem ser coletadas posteriormente pelo mecanismo de logs do host/container.
 
+## Sprint 02 - Etapa 32: scheduler operacional
+
+A execução contínua do incremental pode ser disparada por `systemd --user`. O scheduler não contém lógica de ingestão: ele chama exclusivamente a CLI oficial:
+
+```text
+python -m bulario_service.sync incremental
+```
+
+A implementação de referência fica em:
+
+```text
+ops/systemd/bulario-incremental.service.in
+ops/systemd/bulario-incremental.timer
+ops/systemd/install-user-timer.sh
+ops/systemd/uninstall-user-timer.sh
+```
+
+Não há migration nova.
+
+### Auto-resume seguro para scheduler
+
+O scheduler usa:
+
+```text
+--auto-resume
+```
+
+Essa opção existe para impedir que cada disparo crie um novo incremental quando o anterior ficou `paused` por `max_pages` ou `max_products`.
+
+A regra é:
+
+```text
+exatamente 1 incremental paused
+→ retoma o mesmo run
+
+nenhum incremental paused
+→ cria a próxima janela com a lógica incremental já existente
+
+mais de 1 incremental paused
+→ falha de forma controlada; não escolhe arbitrariamente
+```
+
+`--auto-resume` é mutuamente exclusivo com `--resume` e com overrides manuais de janela.
+
+O primeiro incremental da instalação continua exigindo preparação manual caso ainda não exista nenhum incremental concluído. O scheduler não inventa uma janela retrospectiva inicial.
+
+### Timer systemd de referência
+
+O timer entregue usa, como default técnico inicial:
+
+```text
+OnBootSec=5min
+OnUnitInactiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+```
+
+A frequência de uma hora não representa obrigação regulatória nem decisão definitiva de produto. É apenas um valor operacional inicial e deve ser calibrado conforme volume da fonte, janela incremental, custo e necessidade do ambiente.
+
+O serviço chama:
+
+```text
+incremental
+--auto-resume
+--max-pages 5
+--max-products 20
+--headed
+```
+
+O modo `--headed` foi mantido porque é o transporte que está validado no ambiente atual contra a ANVISA. Para funcionamento como `systemd --user`, a sessão gráfica precisa estar disponível. O instalador importa `DISPLAY` e `XAUTHORITY` quando presentes.
+
+Se o acesso headless vier a ser validado futuramente, `--headed` pode ser removido do unit sem alterar o pipeline.
+
+### Instalação no usuário atual
+
+A partir da raiz do repositório:
+
+```bash
+./ops/systemd/install-user-timer.sh
+```
+
+O instalador:
+
+```text
+detecta o caminho real do repositório
+usa .venv/bin/python
+renderiza o service em ~/.config/systemd/user
+instala o timer
+executa daemon-reload
+habilita e inicia o timer
+lista o próximo disparo
+```
+
+Verificação:
+
+```bash
+systemctl --user status bulario-incremental.timer
+systemctl --user list-timers bulario-incremental.timer
+```
+
+Execução manual do unit:
+
+```bash
+systemctl --user start bulario-incremental.service
+```
+
+Logs:
+
+```bash
+journalctl --user -u bulario-incremental.service
+```
+
+A saída JSON estruturada da Etapa 31 é capturada pelo journal sem necessidade de Prometheus, Grafana ou agente adicional.
+
+### Desinstalação
+
+```bash
+./ops/systemd/uninstall-user-timer.sh
+```
+
+Esse comando remove somente os units de usuário do scheduler. Não altera banco, archive, migrations, `.env` ou dados ingeridos.
+
+### Reconciliation e full
+
+`full` não é agendado automaticamente.
+
+`reconcile` também não recebe timer nesta etapa porque sua periodicidade e abrangência temporal ainda não estão homologadas. A varredura ampla continua sendo iniciada explicitamente pela CLI até que essa política seja definida.
+
+O operational advisory lock da Etapa 30 continua protegendo contra qualquer concorrência incompatível entre disparos do timer e execuções manuais.
+
+## Sprint 02 - Etapa 32: hardening após smoke real do scheduler
+
+O primeiro disparo real do `systemd --user` revelou `HTTP 429` no discovery da ANVISA.
+
+Esse retorno é tratado como **rate limit transitório**, não como erro permanente.
+
+A política passa a considerar transitórios:
+
+```text
+429
+500
+502
+503
+504
+timeouts / transport errors
+```
+
+O connector mantém retries limitados com backoff. Se o discovery continuar falhando de forma transitória após esgotar os retries do adapter, o run:
+
+```text
+permanece no mesmo run_id
+preserva last_completed_page
+é marcado como paused
+não é finalizado como failed
+```
+
+A CLI ainda retorna erro operacional naquela invocação, permitindo que o scheduler tente novamente no próximo disparo.
+
+### Proteção contra salto após run failed
+
+`--auto-resume` não cria silenciosamente um novo incremental quando existe um incremental não resolvido em estado:
+
+```text
+failed
+running
+```
+
+Para `failed`, a CLI exige recuperação explícita do operador.
+
+Essa proteção evita que um scheduler abandone um checkpoint interrompido e abra outra janela baseada somente no último run concluído.
+
+### Recuperação explícita de run failed legado
+
+Runs que ficaram `failed` antes deste hardening podem ser reabertos explicitamente:
+
+```bash
+uv run python -m bulario_service.sync incremental \
+  --recover-failed RUN_ID \
+  --max-pages 1 \
+  --max-products 2 \
+  --headed
+```
+
+`--recover-failed`:
+
+```text
+exige que o run exista
+exige mode=incremental
+exige status=failed
+remove finished_at
+reabre como paused
+retoma pelo checkpoint persistido
+```
+
+A opção é mutuamente exclusiva com:
+
+```text
+--resume
+--auto-resume
+overrides manuais de janela
+```
+
+Depois de uma recuperação bem-sucedida, o timer volta a usar `--auto-resume` normalmente.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.

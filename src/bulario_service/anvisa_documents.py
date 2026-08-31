@@ -173,7 +173,7 @@ class AnvisaDocumentDownloader:
                     f"source_document_id={source_document_id} kind={kind}"
                 )
 
-            if status in {500, 502, 503, 504}:
+            if status in {429, 500, 502, 503, 504}:
                 self._emit_trace(
                     source_document_id=source_document_id,
                     kind=kind,
@@ -197,7 +197,7 @@ class AnvisaDocumentDownloader:
                 )
                 error_type = (
                     AnvisaTransientSourceError
-                    if status in {500, 502, 503, 504}
+                    if status in {429, 500, 502, 503, 504}
                     else AnvisaPermanentSourceError
                 )
                 raise error_type(

@@ -1,0 +1,12 @@
+[Unit]
+Description=Schedule InteliReg Bulário incremental sync
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=1h
+Persistent=true
+RandomizedDelaySec=5min
+Unit=bulario-incremental.service
+
+[Install]
+WantedBy=timers.target

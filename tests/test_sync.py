@@ -153,6 +153,7 @@ def test_incremental_parser_has_safe_operational_defaults() -> None:
     assert args.page_size is None
     assert args.overlap_days is None
     assert args.resume is None
+    assert args.auto_resume is False
     assert args.max_product_retries == 2
     assert args.retry_backoff_seconds == 2.0
 
@@ -692,3 +693,124 @@ def test_invalid_request_emits_structured_event_without_start(
     assert events[0]["event"] == "sync_invalid_request"
     assert events[0]["mode"] == "full"
     assert events[0]["exit_code"] == 4
+
+
+
+def test_incremental_parser_accepts_scheduler_auto_resume() -> None:
+    args = build_parser().parse_args([
+        "incremental",
+        "--auto-resume",
+        "--max-pages",
+        "5",
+        "--max-products",
+        "20",
+        "--headed",
+    ])
+
+    assert args.auto_resume is True
+    assert args.resume is None
+    assert args.max_pages == 5
+    assert args.max_products == 20
+    assert args.headed is True
+
+
+def test_incremental_rejects_resume_and_auto_resume_together(
+    monkeypatch,
+    capsys,
+) -> None:
+    called = False
+
+    def execute(**kwargs):
+        nonlocal called
+        called = True
+        return result(mode="incremental"), None
+
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_incremental_sync",
+        execute,
+    )
+
+    args = build_parser().parse_args([
+        "incremental",
+        "--resume",
+        "8",
+        "--auto-resume",
+    ])
+
+    assert run_cli(args) == 4
+    assert called is False
+    assert "mutuamente exclusivos" in capsys.readouterr().err
+
+
+def test_incremental_auto_resume_rejects_window_overrides(
+    monkeypatch,
+    capsys,
+) -> None:
+    called = False
+
+    def execute(**kwargs):
+        nonlocal called
+        called = True
+        return result(mode="incremental"), None
+
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_incremental_sync",
+        execute,
+    )
+
+    args = build_parser().parse_args([
+        "incremental",
+        "--auto-resume",
+        "--period-end",
+        "2026-08-31T23:59:59.999Z",
+    ])
+
+    assert run_cli(args) == 4
+    assert called is False
+    assert "overrides de janela" in capsys.readouterr().err
+
+
+
+def test_incremental_parser_accepts_explicit_failed_run_recovery() -> None:
+    args = build_parser().parse_args([
+        "incremental",
+        "--recover-failed",
+        "8",
+        "--max-pages",
+        "1",
+        "--max-products",
+        "2",
+        "--headed",
+    ])
+
+    assert args.recover_failed == 8
+    assert args.auto_resume is False
+    assert args.resume is None
+
+
+def test_incremental_recovery_is_mutually_exclusive_with_auto_resume(
+    monkeypatch,
+    capsys,
+) -> None:
+    called = False
+
+    def execute(**kwargs):
+        nonlocal called
+        called = True
+        return result(mode="incremental"), None
+
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_incremental_sync",
+        execute,
+    )
+
+    args = build_parser().parse_args([
+        "incremental",
+        "--recover-failed",
+        "8",
+        "--auto-resume",
+    ])
+
+    assert run_cli(args) == 4
+    assert called is False
+    assert "mutuamente exclusivos" in capsys.readouterr().err

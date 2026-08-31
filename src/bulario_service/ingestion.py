@@ -61,6 +61,21 @@ def pause_ingestion_run(session: Session, run: IngestionRun) -> None:
     session.flush()
 
 
+def recover_failed_ingestion_run(
+    session: Session,
+    run: IngestionRun,
+) -> None:
+    if run.status != RUN_STATUS_FAILED:
+        raise ValueError(
+            "ingestion run can only recover from "
+            f"'{RUN_STATUS_FAILED}', current status is '{run.status}'"
+        )
+
+    run.status = RUN_STATUS_PAUSED
+    run.finished_at = None
+    session.flush()
+
+
 def resume_ingestion_run(session: Session, run: IngestionRun) -> None:
     if run.status != RUN_STATUS_PAUSED:
         raise ValueError(

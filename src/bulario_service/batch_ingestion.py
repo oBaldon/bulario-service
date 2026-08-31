@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from bulario_service.anvisa import (
     AnvisaBularioConnector,
+    AnvisaTransientSourceError,
     DiscoveredProduct,
 )
 from bulario_service.anvisa_documents import AnvisaDocumentDownloader
@@ -334,6 +335,15 @@ def run_batch_ingestion(
 
             page += 1
 
+    except AnvisaTransientSourceError as exc:
+        session.rollback()
+        persisted_run = _get_running_run(session, run_id)
+        pause_ingestion_run(session, persisted_run)
+        session.commit()
+        raise BatchIngestionError(
+            "batch discovery paused after transient source failure: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
     except Exception as exc:
         session.rollback()
         _finish_run_as_failed(session, run_id)

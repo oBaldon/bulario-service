@@ -377,3 +377,55 @@ def test_detail_trace_identifies_history_page() -> None:
     assert traces[0].page == 1
     assert traces[0].status_code == 200
     assert traces[0].outcome == "ok"
+
+
+
+def test_http_429_is_transient_and_retried() -> None:
+    payload = load_fixture("anvisa_bulario_discovery_page.json")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            return httpx.Response(429)
+        return httpx.Response(200, json=payload)
+
+    connector = AnvisaBularioConnector(
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler),
+            base_url="https://consultas.anvisa.gov.br",
+        ),
+        retry_backoff_seconds=(0, 0),
+    )
+
+    result = connector.discover_page(
+        page=1,
+        period_start="2026-08-01",
+        period_end="2026-08-31",
+    )
+
+    assert result.total_elements == 2
+    assert calls == 3
+
+
+def test_exhausted_http_429_is_transient_error() -> None:
+    connector = AnvisaBularioConnector(
+        client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(429)
+            ),
+            base_url="https://consultas.anvisa.gov.br",
+        ),
+        retry_backoff_seconds=(0, 0),
+    )
+
+    with pytest.raises(
+        AnvisaTransientSourceError,
+        match="HTTP 429",
+    ):
+        connector.discover_page(
+            page=9,
+            period_start="2026-08-01",
+            period_end="2026-08-31",
+        )

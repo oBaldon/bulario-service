@@ -9,6 +9,9 @@ from bulario_service.models import IngestionRun
 
 INCREMENTAL_MODE = "incremental"
 COMPLETED_STATUS = "completed"
+PAUSED_STATUS = "paused"
+FAILED_STATUS = "failed"
+RUNNING_STATUS = "running"
 
 
 class IncrementalWindowError(ValueError):
@@ -74,6 +77,50 @@ def resolve_incremental_window(
         overlap_days=overlap_days,
         based_on_run_id=based_on_run_id,
     )
+
+
+def resolve_auto_resume_run_id(
+    session: Session,
+) -> int | None:
+    statement = (
+        select(IngestionRun)
+        .where(
+            IngestionRun.mode == INCREMENTAL_MODE,
+            IngestionRun.status.in_(
+                (PAUSED_STATUS, FAILED_STATUS, RUNNING_STATUS)
+            ),
+        )
+        .order_by(IngestionRun.id.desc())
+        .limit(2)
+    )
+    unresolved_runs = tuple(session.scalars(statement))
+
+    if not unresolved_runs:
+        return None
+
+    latest = unresolved_runs[0]
+    if latest.status == FAILED_STATUS:
+        raise IncrementalWindowError(
+            "latest incremental run is failed; explicit operator recovery "
+            f"is required run_id={latest.id}"
+        )
+    if latest.status == RUNNING_STATUS:
+        raise IncrementalWindowError(
+            "an incremental run is already marked running "
+            f"run_id={latest.id}"
+        )
+
+    paused_runs = tuple(
+        run for run in unresolved_runs
+        if run.status == PAUSED_STATUS
+    )
+    if len(paused_runs) > 1:
+        raise IncrementalWindowError(
+            "multiple paused incremental runs found; "
+            "automatic scheduler resume is ambiguous"
+        )
+    return latest.id
+
 
 
 def latest_completed_incremental_run(

@@ -35,7 +35,7 @@ class FailureClassification:
 
 
 _TRANSIENT_HTTP_PATTERN = re.compile(
-    r"HTTP\s+(500|502|503|504)\b",
+    r"HTTP\s+(429|500|502|503|504)\b",
     flags=re.IGNORECASE,
 )
 _TIMEOUT_PATTERN = re.compile(

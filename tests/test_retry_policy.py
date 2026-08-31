@@ -96,3 +96,16 @@ def test_legacy_http_403_failure_is_source_blocked() -> None:
 
     assert result.error_class == "source_blocked"
     assert result.stop_run is True
+
+
+
+def test_legacy_http_429_is_transient() -> None:
+    classification = classify_persisted_failure(
+        error_class=None,
+        error_code="AnvisaPermanentSourceError",
+        error_message="ANVISA returned HTTP 429 page=9",
+    )
+
+    assert classification.error_class == "transient"
+    assert classification.retryable is True
+    assert classification.stop_run is False

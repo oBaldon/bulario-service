@@ -363,7 +363,7 @@ class AnvisaBularioConnector:
                     f"ANVISA returned HTTP 403 path={path} page={page}"
                 )
 
-            if status in {500, 502, 503, 504}:
+            if status in {429, 500, 502, 503, 504}:
                 self._emit_trace(
                     path=path,
                     page=page,
@@ -386,7 +386,7 @@ class AnvisaBularioConnector:
             )
             error_type = (
                 AnvisaTransientSourceError
-                if status in {500, 502, 503, 504}
+                if status in {429, 500, 502, 503, 504}
                 else AnvisaPermanentSourceError
             )
             raise error_type(

@@ -1,0 +1,13 @@
+[Unit]
+Description=InteliReg Bulário incremental sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=@PROJECT_DIR@
+ExecStart=@PYTHON_BIN@ -m bulario_service.sync incremental --auto-resume --max-pages 5 --max-products 20 --headed
+TimeoutStartSec=30min
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6

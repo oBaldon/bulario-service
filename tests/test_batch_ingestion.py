@@ -2,7 +2,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from bulario_service.anvisa import DiscoveryPage, DiscoveredProduct
+from bulario_service.anvisa import (
+    AnvisaTransientSourceError,
+    DiscoveryPage,
+    DiscoveredProduct,
+)
 from bulario_service.batch_ingestion import (
     BatchIngestionError,
     run_batch_ingestion,
@@ -955,3 +959,50 @@ def test_reconciliation_run_cannot_be_resumed_as_incremental(
             resume_run_id=first.run_id,
             run_mode="incremental",
         )
+
+
+
+def test_transient_discovery_failure_pauses_run_and_preserves_checkpoint(
+    monkeypatch,
+) -> None:
+    session = FakeSession()
+    install_batch_fakes(monkeypatch, session)
+
+    class TransientDiscoveryConnector(FakeConnector):
+        def discover_page(self, **kwargs):
+            page = kwargs["page"]
+            if page == 2:
+                raise AnvisaTransientSourceError(
+                    "ANVISA returned HTTP 429 "
+                    "path=/api/consulta/bulario page=2"
+                )
+            return super().discover_page(**kwargs)
+
+    connector = TransientDiscoveryConnector([
+        [product(10)],
+        [product(20)],
+    ])
+
+    with pytest.raises(
+        BatchIngestionError,
+        match="paused after transient source failure",
+    ):
+        run_batch_ingestion(
+            session,
+            connector=connector,
+            downloader=SimpleNamespace(),
+            storage=SimpleNamespace(),
+            extractor=SimpleNamespace(),
+            period_start="2026-08-01T00:00:00.000Z",
+            period_end="2026-08-31T23:59:59.999Z",
+            page_size=1,
+            max_pages=None,
+            max_products=None,
+            run_mode="incremental",
+        )
+
+    run = session.runs[1]
+    assert run.status == "paused"
+    assert run.last_completed_page == 1
+    assert run.finished_at is None
+    assert session.rollbacks == 1

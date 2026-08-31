@@ -1,10 +1,14 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
+from bulario_service.models import IngestionRun
+
 from bulario_service.incremental import (
     IncrementalWindowError,
+    resolve_auto_resume_run_id,
     resolve_incremental_window,
 )
 
@@ -146,3 +150,64 @@ def test_window_rejects_start_not_before_end(monkeypatch) -> None:
             initial_period_start="2026-08-31T00:00:00.000Z",
             period_end="2026-08-31T00:00:00.000Z",
         )
+
+
+
+def test_auto_resume_returns_only_paused_incremental_run() -> None:
+    session = Mock()
+    run = IngestionRun(
+        id=88,
+        status="paused",
+        mode="incremental",
+    )
+    session.scalars.return_value = [run]
+
+    assert resolve_auto_resume_run_id(session) == 88
+
+
+def test_auto_resume_returns_none_without_paused_incremental() -> None:
+    session = Mock()
+    session.scalars.return_value = []
+
+    assert resolve_auto_resume_run_id(session) is None
+
+
+def test_auto_resume_rejects_ambiguous_paused_incrementals() -> None:
+    session = Mock()
+    session.scalars.return_value = [
+        IngestionRun(id=88, status="paused", mode="incremental"),
+        IngestionRun(id=87, status="paused", mode="incremental"),
+    ]
+
+    with pytest.raises(
+        IncrementalWindowError,
+        match="multiple paused incremental runs",
+    ):
+        resolve_auto_resume_run_id(session)
+
+
+
+def test_auto_resume_blocks_latest_failed_incremental() -> None:
+    session = Mock()
+    session.scalars.return_value = [
+        IngestionRun(id=8, status="failed", mode="incremental"),
+    ]
+
+    with pytest.raises(
+        IncrementalWindowError,
+        match="explicit operator recovery",
+    ):
+        resolve_auto_resume_run_id(session)
+
+
+def test_auto_resume_blocks_stale_running_incremental() -> None:
+    session = Mock()
+    session.scalars.return_value = [
+        IngestionRun(id=8, status="running", mode="incremental"),
+    ]
+
+    with pytest.raises(
+        IncrementalWindowError,
+        match="already marked running",
+    ):
+        resolve_auto_resume_run_id(session)

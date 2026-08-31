@@ -32,8 +32,11 @@ from bulario_service.document_text import (
 from bulario_service.incremental import (
     IncrementalWindow,
     IncrementalWindowError,
+    resolve_auto_resume_run_id,
     resolve_incremental_window,
 )
+from bulario_service.ingestion import recover_failed_ingestion_run
+from bulario_service.models import IngestionRun
 from bulario_service.operational_lock import (
     OperationalLockUnavailableError,
     operational_sync_lock,
@@ -143,6 +146,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="RUN_ID",
         help="Retoma um run incremental pausado.",
+    )
+    incremental.add_argument(
+        "--auto-resume",
+        action="store_true",
+        help=(
+            "Para scheduler: retoma automaticamente o único incremental "
+            "pausado; se não houver, inicia uma nova janela."
+        ),
+    )
+    incremental.add_argument(
+        "--recover-failed",
+        type=int,
+        default=None,
+        metavar="RUN_ID",
+        help=(
+            "Recuperação operacional explícita: reabre um incremental "
+            "failed como paused e retoma o mesmo run."
+        ),
     )
     incremental.add_argument(
         "--overlap-days",
@@ -327,6 +348,8 @@ def execute_incremental_sync(
     initial_period_start: str | None,
     period_end: str | None,
     resume_run_id: int | None,
+    auto_resume: bool,
+    recover_failed_run_id: int | None,
     overlap_days: int | None,
     page_size: int | None,
     max_pages: int | None,
@@ -342,13 +365,44 @@ def execute_incremental_sync(
     try:
         with operational_sync_lock(engine, mode=INCREMENTAL_MODE):
             effective_storage_root = storage_root or settings.storage_root
+            effective_resume_run_id = resume_run_id
+            if recover_failed_run_id is not None:
+                with Session(engine) as recovery_session:
+                    failed_run = recovery_session.get(
+                        IngestionRun,
+                        recover_failed_run_id,
+                    )
+                    if failed_run is None:
+                        raise IncrementalWindowError(
+                            "cannot recover unknown incremental run "
+                            f"run_id={recover_failed_run_id}"
+                        )
+                    if failed_run.mode != INCREMENTAL_MODE:
+                        raise IncrementalWindowError(
+                            "failed run is not incremental "
+                            f"run_id={recover_failed_run_id} "
+                            f"mode={failed_run.mode}"
+                        )
+                    recover_failed_ingestion_run(
+                        recovery_session,
+                        failed_run,
+                    )
+                    recovery_session.commit()
+                effective_resume_run_id = recover_failed_run_id
+
+            if auto_resume and effective_resume_run_id is None:
+                with Session(engine) as resume_session:
+                    effective_resume_run_id = resolve_auto_resume_run_id(
+                        resume_session
+                    )
+
             effective_overlap = (
                 overlap_days
                 if overlap_days is not None
                 else settings.incremental_overlap_days
             )
 
-            if resume_run_id is None:
+            if effective_resume_run_id is None:
                 with Session(engine) as window_session:
                     window = resolve_incremental_window(
                         window_session,
@@ -390,7 +444,7 @@ def execute_incremental_sync(
                         page_size=page_size,
                         max_pages=max_pages,
                         max_products=max_products,
-                        resume_run_id=resume_run_id,
+                        resume_run_id=effective_resume_run_id,
                         run_mode=INCREMENTAL_MODE,
                         max_product_retries=max_product_retries,
                         retry_backoff_seconds=retry_backoff_seconds,
@@ -626,6 +680,12 @@ def _emit_sync_started(args: argparse.Namespace) -> None:
             "max_product_retries",
             None,
         ),
+        auto_resume=getattr(args, "auto_resume", False),
+        recover_failed_run_id=getattr(
+            args,
+            "recover_failed",
+            None,
+        ),
     )
 
 
@@ -733,6 +793,23 @@ def run_cli(args: argparse.Namespace) -> int:
         return 0
 
     if args.command == "incremental":
+        selected_resume_modes = sum((
+            args.resume is not None,
+            args.auto_resume,
+            args.recover_failed is not None,
+        ))
+        if selected_resume_modes > 1:
+            message = (
+                "--resume, --auto-resume e --recover-failed são "
+                "mutuamente exclusivos."
+            )
+            _emit_invalid_request(
+                mode="incremental",
+                message=message,
+            )
+            print(f"Incremental sync failed: {message}", file=sys.stderr)
+            return 4
+
         if args.resume is not None and any((
             args.initial_period_start is not None,
             args.period_end is not None,
@@ -752,12 +829,32 @@ def run_cli(args: argparse.Namespace) -> int:
             )
             return 4
 
+        if (
+            args.auto_resume or args.recover_failed is not None
+        ) and any((
+            args.initial_period_start is not None,
+            args.period_end is not None,
+            args.overlap_days is not None,
+        )):
+            message = (
+                "resume automático/recuperação reutiliza a janela "
+                "persistida; não combine com overrides de janela."
+            )
+            _emit_invalid_request(
+                mode="incremental",
+                message=message,
+            )
+            print(f"Incremental sync failed: {message}", file=sys.stderr)
+            return 4
+
         _emit_sync_started(args)
         try:
             result, window = execute_incremental_sync(
                 initial_period_start=args.initial_period_start,
                 period_end=args.period_end,
                 resume_run_id=args.resume,
+                auto_resume=args.auto_resume,
+                recover_failed_run_id=args.recover_failed,
                 overlap_days=args.overlap_days,
                 page_size=args.page_size,
                 max_pages=args.max_pages,
