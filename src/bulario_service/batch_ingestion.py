@@ -7,7 +7,6 @@ from bulario_service.anvisa_documents import AnvisaDocumentDownloader
 from bulario_service.document_storage import LocalDocumentStorage
 from bulario_service.document_text import PdfTextExtractor
 from bulario_service.e2e_pipeline import (
-    E2EPipelineError,
     PublishFunction,
     process_discovered_product,
 )
@@ -40,10 +39,14 @@ class BatchItemResult:
 class BatchIngestionResult:
     run_id: int
     run_status: str
+    pages_fetched: int
     discovered_count: int
+    duplicate_count: int
     processed_count: int
     ready_count: int
     failed_count: int
+    stopped_by_page_limit: bool
+    stopped_by_product_limit: bool
     items: tuple[BatchItemResult, ...]
 
 
@@ -57,74 +60,105 @@ def run_batch_ingestion(
     period_start: str,
     period_end: str,
     page_size: int = 10,
+    max_pages: int | None = 1,
+    max_products: int | None = None,
     publish: PublishFunction = publish_candidate,
 ) -> BatchIngestionResult:
     """
-    Process the first discovery page as one multi-product ingestion run.
+    Process discovery pages as one multi-product ingestion run.
 
-    Pagination beyond the first page, checkpoint and resume belong to the
-    following Sprint 02 steps. This coordinator intentionally establishes
-    only the multi-product run boundary and per-product failure isolation.
+    Sprint 02 Step 24 adds multi-page discovery, per-run product deduplication
+    and explicit operational limits. Checkpoint and resume remain outside this
+    step and are introduced only in Step 25.
     """
-    if page_size < 1:
-        raise ValueError("page_size must be greater than zero")
+    _validate_limits(
+        page_size=page_size,
+        max_pages=max_pages,
+        max_products=max_products,
+    )
 
     run = start_ingestion_run(session)
     session.commit()
     run_id = _require_id(run.id, "run")
 
+    results: list[BatchItemResult] = []
+    seen_product_ids: set[int] = set()
+    duplicate_count = 0
+    pages_fetched = 0
+    stopped_by_page_limit = False
+    stopped_by_product_limit = False
+    page = 1
+
     try:
-        discovery = connector.discover_page(
-            page=1,
-            page_size=page_size,
-            period_start=period_start,
-            period_end=period_end,
-        )
+        while True:
+            if max_pages is not None and pages_fetched >= max_pages:
+                stopped_by_page_limit = True
+                break
+
+            discovery = connector.discover_page(
+                page=page,
+                page_size=page_size,
+                period_start=period_start,
+                period_end=period_end,
+            )
+            pages_fetched += 1
+
+            for product in discovery.items:
+                product_id = product.source_product_id
+                if product_id in seen_product_ids:
+                    duplicate_count += 1
+                    continue
+
+                if (
+                    max_products is not None
+                    and len(seen_product_ids) >= max_products
+                ):
+                    stopped_by_product_limit = True
+                    break
+
+                seen_product_ids.add(product_id)
+                results.append(
+                    _process_product(
+                        session,
+                        run_id=run_id,
+                        product=product,
+                        connector=connector,
+                        downloader=downloader,
+                        storage=storage,
+                        extractor=extractor,
+                        publish=publish,
+                    )
+                )
+
+            if stopped_by_product_limit:
+                break
+
+            if discovery.last:
+                break
+
+            if discovery.total_pages < 1:
+                raise BatchIngestionError(
+                    "discovery pagination reported invalid total_pages="
+                    f"{discovery.total_pages}"
+                )
+
+            if page >= discovery.total_pages:
+                raise BatchIngestionError(
+                    "discovery pagination is inconsistent: "
+                    "last=false on final page"
+                )
+
+            page += 1
+
     except Exception as exc:
         session.rollback()
         _finish_run_as_failed(session, run_id)
+        if isinstance(exc, BatchIngestionError):
+            raise
         raise BatchIngestionError(
             "batch discovery failed: "
             f"{type(exc).__name__}: {exc}"
         ) from exc
-
-    results: list[BatchItemResult] = []
-
-    for product in discovery.items:
-        try:
-            processed = process_discovered_product(
-                session,
-                run=_get_running_run(session, run_id),
-                product=product,
-                connector=connector,
-                downloader=downloader,
-                storage=storage,
-                extractor=extractor,
-                publish=publish,
-            )
-            session.commit()
-            results.append(
-                BatchItemResult(
-                    source_product_id=processed.source_product_id,
-                    status="ready",
-                    item_id=processed.item_id,
-                    source_document_id=processed.source_document_id,
-                    publish_action=processed.publish_action,
-                    public_row_id=processed.public_row_id,
-                )
-            )
-        except Exception as exc:
-            # process_discovered_product is responsible for rolling back the
-            # product transaction and persisting the item failure whenever an
-            # item was created. The coordinator deliberately continues.
-            results.append(
-                BatchItemResult(
-                    source_product_id=product.source_product_id,
-                    status="failed",
-                    error_code=type(exc).__name__[:64],
-                    error_message=str(exc)[:2000],
-                )
-            )
 
     ready_count = sum(item.status == "ready" for item in results)
     failed_count = sum(item.status == "failed" for item in results)
@@ -144,12 +178,75 @@ def run_batch_ingestion(
     return BatchIngestionResult(
         run_id=run_id,
         run_status=persisted_run.status,
-        discovered_count=len(discovery.items),
+        pages_fetched=pages_fetched,
+        discovered_count=len(seen_product_ids),
+        duplicate_count=duplicate_count,
         processed_count=len(results),
         ready_count=ready_count,
         failed_count=failed_count,
+        stopped_by_page_limit=stopped_by_page_limit,
+        stopped_by_product_limit=stopped_by_product_limit,
         items=tuple(results),
     )
+
+
+def _process_product(
+    session: Session,
+    *,
+    run_id: int,
+    product,
+    connector: AnvisaBularioConnector,
+    downloader: AnvisaDocumentDownloader,
+    storage: LocalDocumentStorage,
+    extractor: PdfTextExtractor,
+    publish: PublishFunction,
+) -> BatchItemResult:
+    try:
+        processed = process_discovered_product(
+            session,
+            run=_get_running_run(session, run_id),
+            product=product,
+            connector=connector,
+            downloader=downloader,
+            storage=storage,
+            extractor=extractor,
+            publish=publish,
+        )
+        session.commit()
+        return BatchItemResult(
+            source_product_id=processed.source_product_id,
+            status="ready",
+            item_id=processed.item_id,
+            source_document_id=processed.source_document_id,
+            publish_action=processed.publish_action,
+            public_row_id=processed.public_row_id,
+        )
+    except Exception as exc:
+        # process_discovered_product owns the product transaction and persists
+        # item failure whenever item creation already happened. The batch
+        # coordinator isolates the failure and continues with other products.
+        return BatchItemResult(
+            source_product_id=product.source_product_id,
+            status="failed",
+            error_code=type(exc).__name__[:64],
+            error_message=str(exc)[:2000],
+        )
+
+
+def _validate_limits(
+    *,
+    page_size: int,
+    max_pages: int | None,
+    max_products: int | None,
+) -> None:
+    if page_size < 1:
+        raise ValueError("page_size must be greater than zero")
+    if max_pages is not None and max_pages < 1:
+        raise ValueError("max_pages must be greater than zero when provided")
+    if max_products is not None and max_products < 1:
+        raise ValueError(
+            "max_products must be greater than zero when provided"
+        )
 
 
 def _get_running_run(session: Session, run_id: int) -> IngestionRun:

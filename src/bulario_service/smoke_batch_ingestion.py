@@ -33,9 +33,9 @@ from bulario_service.publication_publisher import BulaPublicationError
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Executa o Batch Ingestion Coordinator da Sprint 02 sobre a "
-            "primeira página de discovery, processando múltiplos produtos "
-            "no mesmo ingestion run."
+            "Executa o Batch Ingestion Coordinator da Sprint 02 com "
+            "discovery multi-page, deduplicação por produto e limites "
+            "operacionais explícitos."
         )
     )
     parser.add_argument("--period-start", required=True)
@@ -44,9 +44,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--page-size",
         type=int,
         default=2,
+        help="Quantidade solicitada por página de discovery.",
+    )
+    parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=2,
         help=(
-            "Quantidade solicitada na primeira página. Nesta etapa ainda "
-            "não há paginação multi-page."
+            "Máximo de páginas consultadas no smoke. Use um valor pequeno "
+            "para manter a execução real controlada."
+        ),
+    )
+    parser.add_argument(
+        "--max-products",
+        type=int,
+        default=4,
+        help=(
+            "Máximo de produtos únicos processados no run do smoke."
         ),
     )
     parser.add_argument(
@@ -72,6 +86,8 @@ def run_smoke(
     period_start: str,
     period_end: str,
     page_size: int,
+    max_pages: int | None,
+    max_products: int | None,
     profile_dir: Path,
     storage_root: Path | None,
     headed: bool,
@@ -111,16 +127,22 @@ def run_smoke(
                     period_start=period_start,
                     period_end=period_end,
                     page_size=page_size,
+                    max_pages=max_pages,
+                    max_products=max_products,
                 )
 
         print(
             "Batch ingestion: "
             f"run_id={result.run_id} "
             f"run_status={result.run_status} "
+            f"pages_fetched={result.pages_fetched} "
             f"discovered={result.discovered_count} "
+            f"duplicates={result.duplicate_count} "
             f"processed={result.processed_count} "
             f"ready={result.ready_count} "
-            f"failed={result.failed_count}"
+            f"failed={result.failed_count} "
+            f"stopped_by_page_limit={str(result.stopped_by_page_limit).lower()} "
+            f"stopped_by_product_limit={str(result.stopped_by_product_limit).lower()}"
         )
 
         for item in result.items:
@@ -170,6 +192,8 @@ def main() -> None:
             period_start=args.period_start,
             period_end=args.period_end,
             page_size=args.page_size,
+            max_pages=args.max_pages,
+            max_products=args.max_products,
             profile_dir=args.profile_dir,
             storage_root=args.storage_root,
             headed=args.headed,

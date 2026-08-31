@@ -879,6 +879,62 @@ A rotina:
 
 Após o cutover, os smokes que manipulam PDFs usam `BULARIO_STORAGE_ROOT` por padrão. `--storage-root` permanece disponível apenas como override explícito.
 
+## Sprint 02 - Etapa 24: discovery paginada multi-page
+
+O Batch Ingestion Coordinator agora pode percorrer múltiplas páginas de discovery dentro do mesmo `ingestion_run`.
+
+A unidade operacional continua sendo o produto. O coordinator mantém um conjunto de `source_product_id` já vistos no run para impedir processamento duplicado caso o mesmo produto apareça novamente em páginas diferentes.
+
+Limites operacionais:
+
+```text
+page_size
+= quantidade solicitada por página
+
+max_pages
+= máximo de páginas que podem ser consultadas no run
+
+max_products
+= máximo de produtos únicos que podem ser processados
+```
+
+Esses limites existem para manter execuções reais controladas enquanto checkpoint/resume ainda não foi implementado.
+
+O resultado do batch informa:
+
+```text
+pages_fetched
+discovered_count
+duplicate_count
+processed_count
+ready_count
+failed_count
+stopped_by_page_limit
+stopped_by_product_limit
+```
+
+Regras importantes:
+
+- produtos duplicados entre páginas contam em `duplicate_count`, mas são processados apenas uma vez;
+- `discovered_count` representa produtos únicos admitidos para processamento;
+- `max_products` pode interromper o processamento no meio de uma página já consultada;
+- `max_pages` impede consultar a página seguinte;
+- falha de um produto continua isolada dos demais;
+- falha de discovery em qualquer página encerra o run como `failed`;
+- checkpoint e `--resume` permanecem fora desta etapa e serão implementados na Etapa 25.
+
+Smoke real controlado:
+
+```bash
+uv run python -m bulario_service.smoke_batch_ingestion \
+  --period-start 2026-08-01T00:00:00.000Z \
+  --period-end 2026-08-29T23:59:59.999Z \
+  --page-size 2 \
+  --max-pages 2 \
+  --max-products 4 \
+  --headed
+```
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
