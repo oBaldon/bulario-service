@@ -38,6 +38,11 @@ from bulario_service.operational_lock import (
     OperationalLockUnavailableError,
     operational_sync_lock,
 )
+from bulario_service.observability import (
+    emit_observation,
+    result_metrics,
+    sanitize_observation,
+)
 from bulario_service.operational_persistence import OperationalPersistenceError
 from bulario_service.publication_contract import BulaPublicationContractError
 from bulario_service.publication_publisher import BulaPublicationError
@@ -598,18 +603,95 @@ def print_result(result: BatchIngestionResult) -> None:
         )
 
 
+def _safe_error_message(error: Exception) -> str:
+    sanitized = sanitize_observation(str(error))
+    return str(sanitized)
+
+
+def _emit_sync_started(args: argparse.Namespace) -> None:
+    emit_observation(
+        "sync_started",
+        mode=args.command,
+        resume_run_id=getattr(args, "resume", None),
+        requested_period_start=(
+            getattr(args, "period_start", None)
+            or getattr(args, "initial_period_start", None)
+        ),
+        requested_period_end=getattr(args, "period_end", None),
+        page_size=getattr(args, "page_size", None),
+        max_pages=getattr(args, "max_pages", None),
+        max_products=getattr(args, "max_products", None),
+        max_product_retries=getattr(
+            args,
+            "max_product_retries",
+            None,
+        ),
+    )
+
+
+def _emit_sync_result(result: BatchIngestionResult) -> None:
+    emit_observation(
+        "sync_result",
+        **result_metrics(result),
+    )
+
+
+def _emit_sync_blocked(
+    *,
+    mode: str,
+    error: Exception,
+) -> None:
+    emit_observation(
+        "sync_blocked",
+        mode=mode,
+        error_type=type(error).__name__,
+        error_message=_safe_error_message(error),
+        exit_code=3,
+    )
+
+
+def _emit_sync_failed(
+    *,
+    mode: str,
+    error: Exception,
+    exit_code: int,
+) -> None:
+    emit_observation(
+        "sync_failed",
+        mode=mode,
+        error_type=type(error).__name__,
+        error_message=_safe_error_message(error),
+        exit_code=exit_code,
+    )
+
+
+def _emit_invalid_request(
+    *,
+    mode: str,
+    message: str,
+) -> None:
+    emit_observation(
+        "sync_invalid_request",
+        mode=mode,
+        error_message=message,
+        exit_code=4,
+    )
+
+
 def run_cli(args: argparse.Namespace) -> int:
     if args.command == "full":
         if args.resume is None and (
             not args.period_start or not args.period_end
         ):
-            print(
-                "Full sync failed: --period-start and --period-end are required "
-                "for a new full run.",
-                file=sys.stderr,
+            message = (
+                "--period-start and --period-end are required "
+                "for a new full run."
             )
+            _emit_invalid_request(mode="full", message=message)
+            print(f"Full sync failed: {message}", file=sys.stderr)
             return 4
 
+        _emit_sync_started(args)
         try:
             result = execute_full_sync(
                 period_start=args.period_start,
@@ -625,7 +707,8 @@ def run_cli(args: argparse.Namespace) -> int:
                 headed=args.headed,
             )
         except OperationalLockUnavailableError as exc:
-            print(f"Full sync blocked: {exc}", file=sys.stderr)
+            _emit_sync_blocked(mode="full", error=exc)
+            print(f"Full sync blocked: {_safe_error_message(exc)}", file=sys.stderr)
             return 3
         except (
             AnvisaSourceError,
@@ -638,9 +721,11 @@ def run_cli(args: argparse.Namespace) -> int:
             RuntimeError,
             ValueError,
         ) as exc:
-            print(f"Full sync failed: {exc}", file=sys.stderr)
+            _emit_sync_failed(mode="full", error=exc, exit_code=2)
+            print(f"Full sync failed: {_safe_error_message(exc)}", file=sys.stderr)
             return 2
 
+        _emit_sync_result(result)
         print_result(result)
         if result.failed_count:
             return 2
@@ -653,14 +738,21 @@ def run_cli(args: argparse.Namespace) -> int:
             args.period_end is not None,
             args.overlap_days is not None,
         )):
+            message = (
+                "resume reutiliza a janela persistida; não informe "
+                "--initial-period-start, --period-end ou --overlap-days."
+            )
+            _emit_invalid_request(
+                mode="incremental",
+                message=message,
+            )
             print(
-                "Incremental sync failed: resume reutiliza a janela "
-                "persistida; não informe --initial-period-start, "
-                "--period-end ou --overlap-days.",
+                f"Incremental sync failed: {message}",
                 file=sys.stderr,
             )
             return 4
 
+        _emit_sync_started(args)
         try:
             result, window = execute_incremental_sync(
                 initial_period_start=args.initial_period_start,
@@ -677,7 +769,8 @@ def run_cli(args: argparse.Namespace) -> int:
                 headed=args.headed,
             )
         except OperationalLockUnavailableError as exc:
-            print(f"Incremental sync blocked: {exc}", file=sys.stderr)
+            _emit_sync_blocked(mode="incremental", error=exc)
+            print(f"Incremental sync blocked: {_safe_error_message(exc)}", file=sys.stderr)
             return 3
         except (
             AnvisaSourceError,
@@ -691,9 +784,15 @@ def run_cli(args: argparse.Namespace) -> int:
             RuntimeError,
             ValueError,
         ) as exc:
-            print(f"Incremental sync failed: {exc}", file=sys.stderr)
+            _emit_sync_failed(
+                mode="incremental",
+                error=exc,
+                exit_code=2,
+            )
+            print(f"Incremental sync failed: {_safe_error_message(exc)}", file=sys.stderr)
             return 2
 
+        _emit_sync_result(result)
         print_incremental_result(result, window=window)
         if result.failed_count:
             return 2
@@ -704,13 +803,21 @@ def run_cli(args: argparse.Namespace) -> int:
         if args.resume is None and (
             not args.period_start or not args.period_end
         ):
+            message = (
+                "--period-start and --period-end are required "
+                "for a new reconciliation run."
+            )
+            _emit_invalid_request(
+                mode="reconcile",
+                message=message,
+            )
             print(
-                "Reconciliation sync failed: --period-start and --period-end "
-                "are required for a new reconciliation run.",
+                f"Reconciliation sync failed: {message}",
                 file=sys.stderr,
             )
             return 4
 
+        _emit_sync_started(args)
         try:
             result = execute_reconciliation_sync(
                 period_start=args.period_start,
@@ -726,7 +833,11 @@ def run_cli(args: argparse.Namespace) -> int:
                 headed=args.headed,
             )
         except OperationalLockUnavailableError as exc:
-            print(f"Reconciliation sync blocked: {exc}", file=sys.stderr)
+            _emit_sync_blocked(
+                mode="reconciliation",
+                error=exc,
+            )
+            print(f"Reconciliation sync blocked: {_safe_error_message(exc)}", file=sys.stderr)
             return 3
         except (
             AnvisaSourceError,
@@ -739,9 +850,15 @@ def run_cli(args: argparse.Namespace) -> int:
             RuntimeError,
             ValueError,
         ) as exc:
-            print(f"Reconciliation sync failed: {exc}", file=sys.stderr)
+            _emit_sync_failed(
+                mode="reconciliation",
+                error=exc,
+                exit_code=2,
+            )
+            print(f"Reconciliation sync failed: {_safe_error_message(exc)}", file=sys.stderr)
             return 2
 
+        _emit_sync_result(result)
         print_reconciliation_result(result)
         if result.failed_count:
             return 2

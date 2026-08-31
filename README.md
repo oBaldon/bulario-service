@@ -1506,6 +1506,103 @@ Não há migration nova e não há Redis.
 
 Esta etapa não implementa scheduler nem observabilidade estruturada. O objetivo é somente impedir concorrência operacional incompatível e comprovar liberação segura do lock.
 
+## Sprint 02 - Etapa 31: observabilidade estruturada
+
+Os comandos operacionais `full`, `incremental` e `reconcile` passam a emitir observabilidade em JSON Lines no `stderr`, preservando a saída humana existente no `stdout`.
+
+Eventos estruturados:
+
+```text
+sync_started
+sync_result
+sync_blocked
+sync_failed
+sync_invalid_request
+```
+
+Cada linha contém:
+
+```text
+timestamp
+service=bulario-service
+event
+```
+
+e os campos operacionais aplicáveis.
+
+### Métricas de resultado
+
+O evento `sync_result` consolida, por invocação:
+
+```text
+run_id
+run_status
+mode
+period_start
+period_end
+resumed
+start_page
+checkpoint_page
+pages_fetched
+source_total_elements
+discovered
+duplicates
+skipped_terminal
+processed
+ready
+failed
+published
+inserted
+unchanged
+conflicts
+retries
+failed_by_class
+duration_seconds
+stopped_by_page_limit
+stopped_by_product_limit
+stopped_by_source_blocked
+```
+
+`published` representa registros efetivamente inseridos em `public.bulas` naquela invocação; `unchanged` permanece separado para evidenciar idempotência.
+
+### Segurança dos logs
+
+A camada estruturada aplica sanitização defensiva para campos e textos contendo marcadores sensíveis, incluindo:
+
+```text
+Authorization
+Cookie
+password
+secret
+token
+Bearer
+```
+
+Esses valores são substituídos por:
+
+```text
+[REDACTED]
+```
+
+A mesma sanitização é usada nas mensagens humanas de erro da CLI. Cookies, tokens temporários, credenciais e headers de autenticação não devem ser registrados.
+
+### Compatibilidade operacional
+
+A observabilidade não altera:
+
+```text
+exit codes
+checkpoint/resume
+retry
+operational lock
+publicação
+storage
+```
+
+Não há migration nova.
+
+Prometheus, Grafana, tracing distribuído ou infraestrutura externa de logging não são requisitos desta etapa. As linhas JSON podem ser coletadas posteriormente pelo mecanismo de logs do host/container.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.

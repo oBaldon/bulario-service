@@ -547,3 +547,148 @@ def test_full_executor_checks_lock_before_browser_bootstrap(
         )
 
     assert engine.disposed is True
+
+
+
+def test_full_cli_emits_structured_start_and_result_events(
+    monkeypatch,
+    capsys,
+) -> None:
+    import json
+
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_full_sync",
+        lambda **kwargs: result(status="paused", mode="full"),
+    )
+
+    args = build_parser().parse_args([
+        "full",
+        "--period-start",
+        "2026-01-01T00:00:00.000Z",
+        "--period-end",
+        "2026-08-31T23:59:59.999Z",
+    ])
+
+    assert run_cli(args) == 0
+
+    captured = capsys.readouterr()
+    events = [
+        json.loads(line)
+        for line in captured.err.splitlines()
+        if line.startswith("{")
+    ]
+    assert [event["event"] for event in events] == [
+        "sync_started",
+        "sync_result",
+    ]
+    assert events[0]["mode"] == "full"
+    assert events[0]["requested_period_start"] == (
+        "2026-01-01T00:00:00.000Z"
+    )
+    assert events[1]["run_id"] == 42
+    assert events[1]["checkpoint_page"] == 2
+    assert events[1]["processed"] == 4
+    assert events[1]["published"] == 0
+    assert events[1]["duration_seconds"] == 12.345
+
+
+def test_blocked_cli_emits_structured_block_event(
+    monkeypatch,
+    capsys,
+) -> None:
+    import json
+
+    from bulario_service.operational_lock import (
+        OperationalLockUnavailableError,
+    )
+
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_reconciliation_sync",
+        lambda **kwargs: (_ for _ in ()).throw(
+            OperationalLockUnavailableError("already running")
+        ),
+    )
+
+    args = build_parser().parse_args([
+        "reconcile",
+        "--period-start",
+        "2026-08-01T00:00:00.000Z",
+        "--period-end",
+        "2026-08-31T23:59:59.999Z",
+    ])
+
+    assert run_cli(args) == 3
+
+    events = [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("{")
+    ]
+    assert [event["event"] for event in events] == [
+        "sync_started",
+        "sync_blocked",
+    ]
+    assert events[1]["mode"] == "reconciliation"
+    assert events[1]["exit_code"] == 3
+
+
+def test_failed_cli_structured_event_redacts_sensitive_text(
+    monkeypatch,
+    capsys,
+) -> None:
+    import json
+
+    def fail(**kwargs):
+        raise RuntimeError(
+            "request Authorization=secret token=temp-token"
+        )
+
+    monkeypatch.setattr(
+        "bulario_service.sync.execute_full_sync",
+        fail,
+    )
+
+    args = build_parser().parse_args([
+        "full",
+        "--period-start",
+        "2026-01-01T00:00:00.000Z",
+        "--period-end",
+        "2026-08-31T23:59:59.999Z",
+    ])
+
+    assert run_cli(args) == 2
+
+    stderr = capsys.readouterr().err
+    assert "secret" not in stderr
+    assert "temp-token" not in stderr
+    structured_lines = [
+        line
+        for line in stderr.splitlines()
+        if line.startswith("{")
+    ]
+    failed = json.loads(structured_lines[-1])
+    assert failed["event"] == "sync_failed"
+    assert failed["exit_code"] == 2
+    assert "secret" not in failed["error_message"]
+    assert "temp-token" not in failed["error_message"]
+    assert "[REDACTED]" in failed["error_message"]
+
+
+def test_invalid_request_emits_structured_event_without_start(
+    capsys,
+) -> None:
+    import json
+
+    args = build_parser().parse_args(["full"])
+
+    assert run_cli(args) == 4
+
+    events = [
+        json.loads(line)
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("{")
+    ]
+    assert len(events) == 1
+    assert events[0]["event"] == "sync_invalid_request"
+    assert events[0]["mode"] == "full"
+    assert events[0]["exit_code"] == 4
