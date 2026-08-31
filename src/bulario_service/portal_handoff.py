@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from bulario_service.models import (
     BularioDocumentArtifact,
+    BularioDocumentTextArtifact,
     BularioDocumentVersion,
     BularioProduct,
 )
@@ -49,7 +50,7 @@ def validate_latest_ready_handoff(
                 bula_profissional_sha256
             FROM public.bulas
             WHERE ingestion_status = 'ready'
-              AND source_record_id IS NOT NULL
+              AND source_record_id LIKE 'anvisa:%'
             ORDER BY id DESC
             LIMIT 1
             """
@@ -57,8 +58,62 @@ def validate_latest_ready_handoff(
     ).mappings().first()
 
     if row is None:
-        raise PortalHandoffError("no ready public.bulas row was found")
+        raise PortalHandoffError("no ready ANVISA public.bulas row was found")
 
+    return _validate_ready_handoff_row(
+        session,
+        row=row,
+        storage_root=storage_root,
+    )
+
+
+def validate_all_ready_handoffs(
+    session: Session,
+    *,
+    storage_root: Path,
+) -> tuple[PortalHandoffReport, ...]:
+    rows = tuple(
+        session.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    medicamento,
+                    source_record_id,
+                    source_fingerprint,
+                    ingestion_status,
+                    bula_paciente,
+                    bula_profissional,
+                    bula_paciente_sha256,
+                    bula_profissional_sha256
+                FROM public.bulas
+                WHERE ingestion_status = 'ready'
+                  AND source_record_id LIKE 'anvisa:%'
+                ORDER BY id ASC
+                """
+            )
+        ).mappings()
+    )
+
+    if not rows:
+        raise PortalHandoffError("no ready ANVISA public.bulas rows were found")
+
+    return tuple(
+        _validate_ready_handoff_row(
+            session,
+            row=row,
+            storage_root=storage_root,
+        )
+        for row in rows
+    )
+
+
+def _validate_ready_handoff_row(
+    session: Session,
+    *,
+    row,
+    storage_root: Path,
+) -> PortalHandoffReport:
     source_product_id, source_document_id = _parse_source_record_id(
         row["source_record_id"]
     )
@@ -112,6 +167,17 @@ def validate_latest_ready_handoff(
         label="professional",
     )
 
+    _validate_text_handoff(
+        session,
+        operational_artifact=by_kind["patient"],
+        label="patient",
+    )
+    _validate_text_handoff(
+        session,
+        operational_artifact=by_kind["professional"],
+        label="professional",
+    )
+
     return PortalHandoffReport(
         public_row_id=row["id"],
         source_record_id=row["source_record_id"],
@@ -123,6 +189,43 @@ def validate_latest_ready_handoff(
         patient_sha256=row["bula_paciente_sha256"],
         professional_sha256=row["bula_profissional_sha256"],
     )
+
+
+def _validate_text_handoff(
+    session: Session,
+    *,
+    operational_artifact: BularioDocumentArtifact,
+    label: str,
+) -> None:
+    text_artifact = session.scalar(
+        select(BularioDocumentTextArtifact).where(
+            BularioDocumentTextArtifact.document_artifact_id
+            == operational_artifact.id,
+            BularioDocumentTextArtifact.normalization_version == "v1",
+        )
+    )
+    if text_artifact is None:
+        raise PortalHandoffError(
+            f"{label} operational PDF has no normalized text v1"
+        )
+
+    text_content = text_artifact.text_content
+    if not text_content:
+        raise PortalHandoffError(
+            f"{label} normalized text v1 is empty"
+        )
+    if text_artifact.character_count != len(text_content):
+        raise PortalHandoffError(
+            f"{label} normalized text character_count is inconsistent"
+        )
+
+    text_sha256 = hashlib.sha256(
+        text_content.encode("utf-8")
+    ).hexdigest()
+    if text_sha256 != text_artifact.text_sha256:
+        raise PortalHandoffError(
+            f"{label} normalized text SHA-256 is inconsistent"
+        )
 
 
 def _parse_source_record_id(value: str) -> tuple[int, int]:

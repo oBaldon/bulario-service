@@ -1807,6 +1807,55 @@ overrides manuais de janela
 
 Depois de uma recuperação bem-sucedida, o timer volta a usar `--auto-resume` normalmente.
 
+## Sprint 02 - Etapa 33: Operational E2E / Hardening
+
+A etapa final adiciona uma auditoria operacional read-only:
+
+```bash
+uv run python -m bulario_service.operational_audit
+```
+
+Ela não abre Chrome, não acessa a ANVISA e não grava no banco.
+
+A auditoria verifica o conjunto de publicações ANVISA em `public.bulas` e o archive compartilhado:
+
+```text
+existência de publicações ANVISA
+source_record_id sem duplicidade
+ingestion_status=ready
+campos mínimos do contrato preenchidos
+nenhum run em running
+nenhum incremental em failed
+no máximo um incremental paused
+cada public row vinculada à versão operacional correta
+source_fingerprint consistente
+PDF paciente/profissional existente
+assinatura %PDF-
+SHA-256 físico = operacional = público
+texto normalizado v1 presente
+character_count consistente
+text_sha256 consistente
+```
+
+A validação documental é feita para **todas** as publicações ANVISA `ready`, não apenas para a última linha.
+
+Saída esperada:
+
+```text
+{"event":"operational_audit",...,"ok":true}
+sprint02_operational_audit_ready=true
+```
+
+O comando retorna exit code `2` quando alguma invariável falha.
+
+A matriz consolidada de fechamento está em:
+
+```text
+docs/SPRINT02_OPERATIONAL_ACCEPTANCE.md
+```
+
+Não há migration nova nesta etapa.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.
