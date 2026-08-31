@@ -935,6 +935,103 @@ uv run python -m bulario_service.smoke_batch_ingestion \
   --headed
 ```
 
+## Sprint 02 - Etapa 25: checkpoint e resume
+
+Os `ingestion_runs` agora persistem metadados suficientes para retomada controlada:
+
+```text
+mode
+period_start
+period_end
+page_size
+last_completed_page
+last_checkpoint_at
+```
+
+A migration correspondente é:
+
+```text
+20260831_0004_add_ingestion_run_checkpoint
+```
+
+Antes de executar os novos smokes em um banco existente:
+
+```bash
+uv run alembic upgrade head
+uv run alembic current
+```
+
+### Semântica do checkpoint
+
+`last_completed_page` representa a última página de discovery integralmente processada. O checkpoint só avança depois que todos os produtos admitidos daquela página chegaram a um estado terminal para esta etapa (`ready` ou `failed`).
+
+Se `--max-products` interromper o run no meio de uma página, essa página **não** é marcada como concluída. No resume ela é consultada novamente e os produtos que já possuem item terminal no mesmo run são ignorados.
+
+Isso evita depender da hipótese de que a composição de uma página permaneça imutável entre duas chamadas.
+
+### Estado `paused`
+
+Um stop controlado por `--max-pages` ou `--max-products`, quando ainda há trabalho a percorrer, deixa o run em:
+
+```text
+paused
+```
+
+Esse estado significa que a execução pode ser retomada. Ele não é um estado do contrato público `BULA_CONTRACT_V1`; pertence exclusivamente ao modelo operacional do produtor.
+
+Runs `completed` e `failed` permanecem terminais e não podem ser retomados nesta etapa.
+
+### Novo run controlado
+
+Exemplo para processar apenas uma página e gerar um checkpoint resumível:
+
+```bash
+uv run python -m bulario_service.smoke_batch_ingestion \
+  --period-start 2026-08-01T00:00:00.000Z \
+  --period-end 2026-08-29T23:59:59.999Z \
+  --page-size 2 \
+  --max-pages 1 \
+  --max-products 4 \
+  --headed
+```
+
+Se houver mais páginas, o resultado esperado contém:
+
+```text
+run_status=paused
+start_page=1
+last_completed_page=1
+stopped_by_page_limit=true
+```
+
+### Resume
+
+Para retomar, informe apenas o `run_id` pausado:
+
+```bash
+uv run python -m bulario_service.smoke_batch_ingestion \
+  --resume RUN_ID \
+  --max-pages 2 \
+  --max-products 4 \
+  --headed
+```
+
+A janela e o `page_size` persistidos no run são reutilizados automaticamente.
+
+É permitido informar novamente `--period-start`, `--period-end` ou `--page-size`, mas os valores devem coincidir exatamente com o run original. Divergência é rejeitada antes de alterar o estado do run.
+
+O resume:
+
+- preserva a janela original;
+- inicia em `last_completed_page + 1`;
+- quando necessário, repete a primeira página ainda não concluída;
+- ignora itens `ready` ou `failed` já persistidos no mesmo run;
+- atualiza checkpoint somente após página integralmente processada;
+- continua usando o mesmo `ingestion_run`;
+- não cria uma segunda execução para representar a retomada.
+
+Retry de itens `failed` ainda não pertence a esta etapa. A política de retry e classificação avançada de falhas será introduzida posteriormente na Sprint 02.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.

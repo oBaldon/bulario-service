@@ -13,6 +13,18 @@ def test_ingestion_tables_belong_to_bulario_schema() -> None:
     assert IngestionItem.__table__.schema == "bulario"
 
 
+
+def test_ingestion_run_keeps_checkpoint_metadata() -> None:
+    columns = IngestionRun.__table__.columns
+
+    assert "mode" in columns
+    assert "period_start" in columns
+    assert "period_end" in columns
+    assert "page_size" in columns
+    assert "last_completed_page" in columns
+    assert "last_checkpoint_at" in columns
+
+
 def test_ingestion_item_keeps_operational_payload_and_fingerprint() -> None:
     columns = IngestionItem.__table__.columns
 

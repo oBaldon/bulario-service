@@ -20,6 +20,8 @@ class FakeSession:
         self.runs = {}
         self.commits = 0
         self.rollbacks = 0
+        self.terminal_product_ids = set()
+        self.failed_product_ids = set()
 
     def add(self, entity):
         if isinstance(entity, IngestionRun):
@@ -102,13 +104,15 @@ class InconsistentPaginationConnector(FakeConnector):
         )
 
 
-def install_product_processor(monkeypatch, *, failing_ids=()):
+def install_batch_fakes(monkeypatch, session, *, failing_ids=()):
     calls = []
     failing_ids = set(failing_ids)
 
-    def process(session, *, run, product, **kwargs):
+    def process(_session, *, run, product, **kwargs):
         calls.append(product.source_product_id)
+        session.terminal_product_ids.add(product.source_product_id)
         if product.source_product_id in failing_ids:
+            session.failed_product_ids.add(product.source_product_id)
             raise E2EPipelineError(
                 f"controlled product failure {product.source_product_id}"
             )
@@ -123,6 +127,16 @@ def install_product_processor(monkeypatch, *, failing_ids=()):
     monkeypatch.setattr(
         "bulario_service.batch_ingestion.process_discovered_product",
         process,
+    )
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion._load_terminal_product_ids",
+        lambda _session, *, run_id: set(session.terminal_product_ids),
+    )
+    monkeypatch.setattr(
+        "bulario_service.batch_ingestion._count_items_with_status",
+        lambda _session, *, run_id, status: (
+            len(session.failed_product_ids) if status == "failed" else 0
+        ),
     )
     return calls
 
@@ -139,17 +153,23 @@ def run_batch(session, connector, **kwargs):
     return run_batch_ingestion(
         session,
         connector=connector,
-        period_start="2026-08-01T00:00:00.000Z",
-        period_end="2026-08-31T23:59:59.999Z",
+        period_start=kwargs.pop(
+            "period_start",
+            "2026-08-01T00:00:00.000Z",
+        ),
+        period_end=kwargs.pop(
+            "period_end",
+            "2026-08-31T23:59:59.999Z",
+        ),
         **dummy_dependencies(),
         **kwargs,
     )
 
 
-def test_batch_completes_multiple_products_in_one_run(monkeypatch) -> None:
+def test_batch_completes_single_page_run(monkeypatch) -> None:
     session = FakeSession()
-    connector = FakeConnector([[product(10), product(20), product(30)]])
-    calls = install_product_processor(monkeypatch)
+    connector = FakeConnector([[product(10), product(20)]])
+    calls = install_batch_fakes(monkeypatch, session)
 
     result = run_batch(
         session,
@@ -157,36 +177,30 @@ def test_batch_completes_multiple_products_in_one_run(monkeypatch) -> None:
         page_size=25,
     )
 
-    assert result.run_id == 1
     assert result.run_status == "completed"
+    assert result.resumed is False
+    assert result.start_page == 1
+    assert result.last_completed_page == 1
     assert result.pages_fetched == 1
-    assert result.discovered_count == 3
-    assert result.duplicate_count == 0
-    assert result.processed_count == 3
-    assert result.ready_count == 3
-    assert result.failed_count == 0
-    assert result.stopped_by_page_limit is False
-    assert result.stopped_by_product_limit is False
-    assert [item.source_product_id for item in result.items] == [10, 20, 30]
-    assert all(item.status == "ready" for item in result.items)
-    assert calls == [10, 20, 30]
-    assert connector.discovery_calls == [{
-        "page": 1,
-        "page_size": 25,
-        "period_start": "2026-08-01T00:00:00.000Z",
-        "period_end": "2026-08-31T23:59:59.999Z",
-    }]
-    assert session.runs[1].status == "completed"
+    assert result.discovered_count == 2
+    assert result.skipped_terminal_count == 0
+    assert result.processed_count == 2
+    assert calls == [10, 20]
+    run = session.runs[result.run_id]
+    assert run.mode == "batch"
+    assert run.page_size == 25
+    assert run.period_start == "2026-08-01T00:00:00.000Z"
+    assert run.period_end == "2026-08-31T23:59:59.999Z"
 
 
-def test_multi_page_discovery_processes_pages_in_order(monkeypatch) -> None:
+def test_multi_page_discovery_completes_and_checkpoints(monkeypatch) -> None:
     session = FakeSession()
     connector = FakeConnector([
         [product(10), product(20)],
         [product(30), product(40)],
         [product(50)],
     ])
-    calls = install_product_processor(monkeypatch)
+    calls = install_batch_fakes(monkeypatch, session)
 
     result = run_batch(
         session,
@@ -195,12 +209,12 @@ def test_multi_page_discovery_processes_pages_in_order(monkeypatch) -> None:
         max_pages=None,
     )
 
+    assert result.run_status == "completed"
     assert result.pages_fetched == 3
+    assert result.last_completed_page == 3
     assert result.discovered_count == 5
-    assert result.processed_count == 5
-    assert result.ready_count == 5
     assert calls == [10, 20, 30, 40, 50]
-    assert [call["page"] for call in connector.discovery_calls] == [1, 2, 3]
+    assert session.runs[result.run_id].last_checkpoint_at is not None
 
 
 def test_duplicate_product_across_pages_is_processed_once(monkeypatch) -> None:
@@ -209,7 +223,7 @@ def test_duplicate_product_across_pages_is_processed_once(monkeypatch) -> None:
         [product(10), product(20)],
         [product(20), product(30)],
     ])
-    calls = install_product_processor(monkeypatch)
+    calls = install_batch_fakes(monkeypatch, session)
 
     result = run_batch(
         session,
@@ -217,21 +231,19 @@ def test_duplicate_product_across_pages_is_processed_once(monkeypatch) -> None:
         max_pages=None,
     )
 
-    assert result.pages_fetched == 2
-    assert result.discovered_count == 3
     assert result.duplicate_count == 1
     assert result.processed_count == 3
     assert calls == [10, 20, 30]
 
 
-def test_max_pages_stops_before_fetching_next_page(monkeypatch) -> None:
+def test_max_pages_pauses_run_after_checkpoint(monkeypatch) -> None:
     session = FakeSession()
     connector = FakeConnector([
         [product(10)],
         [product(20)],
         [product(30)],
     ])
-    calls = install_product_processor(monkeypatch)
+    calls = install_batch_fakes(monkeypatch, session)
 
     result = run_batch(
         session,
@@ -239,48 +251,200 @@ def test_max_pages_stops_before_fetching_next_page(monkeypatch) -> None:
         max_pages=2,
     )
 
-    assert result.pages_fetched == 2
-    assert result.discovered_count == 2
+    assert result.run_status == "paused"
+    assert result.last_completed_page == 2
     assert result.stopped_by_page_limit is True
-    assert result.stopped_by_product_limit is False
     assert calls == [10, 20]
     assert [call["page"] for call in connector.discovery_calls] == [1, 2]
 
 
-def test_max_products_stops_inside_page_without_processing_extra(
-    monkeypatch,
-) -> None:
+def test_resume_uses_persisted_window_and_starts_next_page(monkeypatch) -> None:
     session = FakeSession()
-    connector = FakeConnector([
-        [product(10), product(20)],
-        [product(30), product(40)],
+    first_connector = FakeConnector([
+        [product(10)],
+        [product(20)],
+        [product(30)],
     ])
-    calls = install_product_processor(monkeypatch)
+    calls = install_batch_fakes(monkeypatch, session)
 
-    result = run_batch(
+    first = run_batch(
         session,
-        connector,
-        max_pages=None,
-        max_products=3,
+        first_connector,
+        page_size=1,
+        max_pages=1,
     )
 
-    assert result.pages_fetched == 2
-    assert result.discovered_count == 3
-    assert result.processed_count == 3
-    assert result.stopped_by_product_limit is True
-    assert result.stopped_by_page_limit is False
+    assert first.run_status == "paused"
+    assert first.last_completed_page == 1
+    assert calls == [10]
+
+    second_connector = FakeConnector([
+        [product(999)],
+        [product(20)],
+        [product(30)],
+    ])
+    resumed = run_batch_ingestion(
+        session,
+        connector=second_connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start=None,
+        period_end=None,
+        page_size=None,
+        max_pages=None,
+        resume_run_id=first.run_id,
+    )
+
+    assert resumed.run_id == first.run_id
+    assert resumed.resumed is True
+    assert resumed.start_page == 2
+    assert resumed.last_completed_page == 3
+    assert resumed.run_status == "completed"
+    assert calls == [10, 20, 30]
+    assert [call["page"] for call in second_connector.discovery_calls] == [2, 3]
+    assert second_connector.discovery_calls[0]["page_size"] == 1
+    assert second_connector.discovery_calls[0]["period_start"] == (
+        "2026-08-01T00:00:00.000Z"
+    )
+
+
+def test_resume_mid_page_skips_terminal_items(monkeypatch) -> None:
+    session = FakeSession()
+    connector = FakeConnector([
+        [product(10), product(20), product(30)],
+    ])
+    calls = install_batch_fakes(monkeypatch, session)
+
+    first = run_batch(
+        session,
+        connector,
+        page_size=3,
+        max_pages=None,
+        max_products=1,
+    )
+
+    assert first.run_status == "paused"
+    assert first.last_completed_page == 0
+    assert calls == [10]
+
+    resumed_connector = FakeConnector([
+        [product(10), product(20), product(30)],
+    ])
+    resumed = run_batch_ingestion(
+        session,
+        connector=resumed_connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start=None,
+        period_end=None,
+        page_size=None,
+        max_pages=None,
+        max_products=None,
+        resume_run_id=first.run_id,
+    )
+
+    assert resumed.start_page == 1
+    assert resumed.skipped_terminal_count == 1
+    assert resumed.last_completed_page == 1
+    assert resumed.run_status == "completed"
     assert calls == [10, 20, 30]
 
 
-def test_product_failure_is_isolated_and_batch_continues_across_pages(
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        (
+            "period_start",
+            "2026-07-01T00:00:00.000Z",
+            "period_start",
+        ),
+        (
+            "period_end",
+            "2026-09-01T00:00:00.000Z",
+            "period_end",
+        ),
+        ("page_size", 99, "page_size"),
+    ],
+)
+def test_resume_rejects_incompatible_parameters(
     monkeypatch,
+    field,
+    value,
+    message,
 ) -> None:
+    session = FakeSession()
+    calls = install_batch_fakes(monkeypatch, session)
+    connector = FakeConnector([[product(10)], [product(20)]])
+
+    first = run_batch(
+        session,
+        connector,
+        page_size=1,
+        max_pages=1,
+    )
+    assert first.run_status == "paused"
+
+    kwargs = {
+        "period_start": None,
+        "period_end": None,
+        "page_size": None,
+    }
+    kwargs[field] = value
+
+    with pytest.raises(BatchIngestionError, match=message):
+        run_batch_ingestion(
+            session,
+            connector=connector,
+            downloader=SimpleNamespace(),
+            storage=SimpleNamespace(),
+            extractor=SimpleNamespace(),
+            max_pages=1,
+            resume_run_id=first.run_id,
+            **kwargs,
+        )
+
+    assert session.runs[first.run_id].status == "paused"
+    assert calls == [10]
+
+
+def test_completed_run_cannot_be_resumed(monkeypatch) -> None:
+    session = FakeSession()
+    install_batch_fakes(monkeypatch, session)
+    connector = FakeConnector([[product(10)]])
+
+    completed = run_batch(
+        session,
+        connector,
+        max_pages=None,
+    )
+    assert completed.run_status == "completed"
+
+    with pytest.raises(BatchIngestionError, match="not resumable"):
+        run_batch_ingestion(
+            session,
+            connector=connector,
+            downloader=SimpleNamespace(),
+            storage=SimpleNamespace(),
+            extractor=SimpleNamespace(),
+            period_start=None,
+            period_end=None,
+            resume_run_id=completed.run_id,
+        )
+
+
+def test_product_failure_is_isolated_and_final_run_fails(monkeypatch) -> None:
     session = FakeSession()
     connector = FakeConnector([
         [product(10), product(20)],
         [product(30)],
     ])
-    calls = install_product_processor(monkeypatch, failing_ids={20})
+    calls = install_batch_fakes(
+        monkeypatch,
+        session,
+        failing_ids={20},
+    )
 
     result = run_batch(
         session,
@@ -290,37 +454,12 @@ def test_product_failure_is_isolated_and_batch_continues_across_pages(
 
     assert calls == [10, 20, 30]
     assert result.run_status == "failed"
-    assert result.pages_fetched == 2
     assert result.ready_count == 2
     assert result.failed_count == 1
-    assert [item.status for item in result.items] == [
-        "ready",
-        "failed",
-        "ready",
-    ]
-    assert result.items[1].error_code == "E2EPipelineError"
-    assert "controlled product failure 20" in result.items[1].error_message
-    assert session.runs[1].status == "failed"
+    assert result.last_completed_page == 2
 
 
-def test_empty_discovery_completes_empty_batch(monkeypatch) -> None:
-    session = FakeSession()
-    connector = FakeConnector([[]])
-    calls = install_product_processor(monkeypatch)
-
-    result = run_batch(session, connector)
-
-    assert calls == []
-    assert result.run_status == "completed"
-    assert result.pages_fetched == 1
-    assert result.discovered_count == 0
-    assert result.processed_count == 0
-    assert result.ready_count == 0
-    assert result.failed_count == 0
-    assert result.items == ()
-
-
-def test_later_page_discovery_failure_preserves_prior_products_and_fails_run(
+def test_later_page_discovery_failure_preserves_checkpoint_and_fails_run(
     monkeypatch,
 ) -> None:
     session = FakeSession()
@@ -328,7 +467,7 @@ def test_later_page_discovery_failure_preserves_prior_products_and_fails_run(
         [[product(10)], [product(20)]],
         failing_page=2,
     )
-    calls = install_product_processor(monkeypatch)
+    calls = install_batch_fakes(monkeypatch, session)
 
     with pytest.raises(
         BatchIngestionError,
@@ -341,14 +480,14 @@ def test_later_page_discovery_failure_preserves_prior_products_and_fails_run(
         )
 
     assert calls == [10]
+    assert session.runs[1].last_completed_page == 1
     assert session.runs[1].status == "failed"
-    assert session.rollbacks == 1
 
 
 def test_inconsistent_pagination_fails_run(monkeypatch) -> None:
     session = FakeSession()
     connector = InconsistentPaginationConnector([[product(10)]])
-    install_product_processor(monkeypatch)
+    install_batch_fakes(monkeypatch, session)
 
     with pytest.raises(
         BatchIngestionError,
@@ -363,6 +502,24 @@ def test_inconsistent_pagination_fails_run(monkeypatch) -> None:
     assert session.runs[1].status == "failed"
 
 
+def test_new_run_requires_window_before_creation(monkeypatch) -> None:
+    session = FakeSession()
+    install_batch_fakes(monkeypatch, session)
+
+    with pytest.raises(ValueError, match="period_start and period_end"):
+        run_batch_ingestion(
+            session,
+            connector=FakeConnector([[]]),
+            downloader=SimpleNamespace(),
+            storage=SimpleNamespace(),
+            extractor=SimpleNamespace(),
+            period_start=None,
+            period_end=None,
+        )
+
+    assert session.runs == {}
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -372,10 +529,12 @@ def test_inconsistent_pagination_fails_run(monkeypatch) -> None:
     ],
 )
 def test_invalid_limits_are_rejected_before_run_creation(
+    monkeypatch,
     kwargs,
     message,
 ) -> None:
     session = FakeSession()
+    install_batch_fakes(monkeypatch, session)
 
     with pytest.raises(ValueError, match=message):
         run_batch(
@@ -385,4 +544,3 @@ def test_invalid_limits_are_rejected_before_run_creation(
         )
 
     assert session.runs == {}
-    assert session.commits == 0

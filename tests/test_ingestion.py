@@ -12,10 +12,14 @@ from bulario_service.ingestion import (
     ITEM_STATUS_READY,
     RUN_STATUS_COMPLETED,
     RUN_STATUS_FAILED,
+    RUN_STATUS_PAUSED,
     RUN_STATUS_RUNNING,
+    checkpoint_ingestion_run,
     complete_ingestion_run,
     fail_ingestion_run,
+    pause_ingestion_run,
     register_ingestion_item,
+    resume_ingestion_run,
     start_ingestion_run,
     transition_ingestion_item,
 )
@@ -184,3 +188,69 @@ def test_error_details_are_rejected_outside_failed_transition() -> None:
             to_status=ITEM_STATUS_FETCHING,
             error_code="unexpected",
         )
+
+
+
+def test_pause_and_resume_ingestion_run() -> None:
+    session = Mock()
+    run = IngestionRun(status=RUN_STATUS_RUNNING)
+
+    pause_ingestion_run(session, run)
+
+    assert run.status == RUN_STATUS_PAUSED
+    assert run.finished_at is None
+
+    resume_ingestion_run(session, run)
+
+    assert run.status == RUN_STATUS_RUNNING
+    assert run.finished_at is None
+
+
+def test_checkpoint_advances_running_run() -> None:
+    session = Mock()
+    run = IngestionRun(
+        status=RUN_STATUS_RUNNING,
+        last_completed_page=1,
+    )
+
+    checkpoint_ingestion_run(
+        session,
+        run,
+        completed_page=2,
+    )
+
+    assert run.last_completed_page == 2
+    assert isinstance(run.last_checkpoint_at, datetime)
+
+
+def test_checkpoint_cannot_move_backwards() -> None:
+    session = Mock()
+    run = IngestionRun(
+        status=RUN_STATUS_RUNNING,
+        last_completed_page=3,
+    )
+
+    with pytest.raises(ValueError, match="cannot move backwards"):
+        checkpoint_ingestion_run(
+            session,
+            run,
+            completed_page=2,
+        )
+
+
+def test_start_run_can_persist_resume_metadata() -> None:
+    session = Mock()
+
+    run = start_ingestion_run(
+        session,
+        mode="batch",
+        period_start="2026-08-01T00:00:00.000Z",
+        period_end="2026-08-31T23:59:59.999Z",
+        page_size=25,
+    )
+
+    assert run.mode == "batch"
+    assert run.period_start == "2026-08-01T00:00:00.000Z"
+    assert run.period_end == "2026-08-31T23:59:59.999Z"
+    assert run.page_size == 25
+    assert run.last_completed_page == 0

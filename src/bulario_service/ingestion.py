@@ -6,6 +6,7 @@ from bulario_service.models import IngestionItem, IngestionRun
 
 
 RUN_STATUS_RUNNING = "running"
+RUN_STATUS_PAUSED = "paused"
 RUN_STATUS_COMPLETED = "completed"
 RUN_STATUS_FAILED = "failed"
 
@@ -27,12 +28,66 @@ _ITEM_TRANSITIONS: dict[str, set[str]] = {
 }
 
 
-def start_ingestion_run(session: Session) -> IngestionRun:
-    run = IngestionRun(status=RUN_STATUS_RUNNING)
+def start_ingestion_run(
+    session: Session,
+    *,
+    mode: str | None = None,
+    period_start: str | None = None,
+    period_end: str | None = None,
+    page_size: int | None = None,
+) -> IngestionRun:
+    run = IngestionRun(
+        status=RUN_STATUS_RUNNING,
+        mode=mode,
+        period_start=period_start,
+        period_end=period_end,
+        page_size=page_size,
+        last_completed_page=0,
+    )
     session.add(run)
     session.flush()
     return run
 
+
+
+def pause_ingestion_run(session: Session, run: IngestionRun) -> None:
+    if run.status != RUN_STATUS_RUNNING:
+        raise ValueError(
+            "ingestion run can only pause from "
+            f"'{RUN_STATUS_RUNNING}', current status is '{run.status}'"
+        )
+
+    run.status = RUN_STATUS_PAUSED
+    session.flush()
+
+
+def resume_ingestion_run(session: Session, run: IngestionRun) -> None:
+    if run.status != RUN_STATUS_PAUSED:
+        raise ValueError(
+            "ingestion run can only resume from "
+            f"'{RUN_STATUS_PAUSED}', current status is '{run.status}'"
+        )
+
+    run.status = RUN_STATUS_RUNNING
+    session.flush()
+
+
+def checkpoint_ingestion_run(
+    session: Session,
+    run: IngestionRun,
+    *,
+    completed_page: int,
+) -> None:
+    if run.status != RUN_STATUS_RUNNING:
+        raise ValueError("checkpoint requires a running ingestion run")
+    if completed_page < 1:
+        raise ValueError("completed_page must be greater than zero")
+    if completed_page < run.last_completed_page:
+        raise ValueError("checkpoint cannot move backwards")
+
+    run.last_completed_page = completed_page
+    run.last_checkpoint_at = datetime.now(UTC)
+    session.flush()
 
 def complete_ingestion_run(session: Session, run: IngestionRun) -> None:
     _finish_ingestion_run(session, run, RUN_STATUS_COMPLETED)

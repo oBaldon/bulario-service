@@ -38,13 +38,26 @@ def build_parser() -> argparse.ArgumentParser:
             "operacionais explícitos."
         )
     )
-    parser.add_argument("--period-start", required=True)
-    parser.add_argument("--period-end", required=True)
+    parser.add_argument("--period-start")
+    parser.add_argument("--period-end")
+    parser.add_argument(
+        "--resume",
+        type=int,
+        default=None,
+        metavar="RUN_ID",
+        help=(
+            "Retoma um ingestion run pausado. A janela e o page_size "
+            "persistidos são reutilizados; valores informados devem coincidir."
+        ),
+    )
     parser.add_argument(
         "--page-size",
         type=int,
-        default=2,
-        help="Quantidade solicitada por página de discovery.",
+        default=None,
+        help=(
+            "Quantidade solicitada por página. Em novo run, o default "
+            "interno é 10; em resume, omitir reutiliza o valor persistido."
+        ),
     )
     parser.add_argument(
         "--max-pages",
@@ -83,9 +96,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_smoke(
     *,
-    period_start: str,
-    period_end: str,
-    page_size: int,
+    period_start: str | None,
+    period_end: str | None,
+    page_size: int | None,
+    resume_run_id: int | None,
     max_pages: int | None,
     max_products: int | None,
     profile_dir: Path,
@@ -129,15 +143,20 @@ def run_smoke(
                     page_size=page_size,
                     max_pages=max_pages,
                     max_products=max_products,
+                    resume_run_id=resume_run_id,
                 )
 
         print(
             "Batch ingestion: "
             f"run_id={result.run_id} "
             f"run_status={result.run_status} "
+            f"resumed={str(result.resumed).lower()} "
+            f"start_page={result.start_page} "
+            f"last_completed_page={result.last_completed_page} "
             f"pages_fetched={result.pages_fetched} "
             f"discovered={result.discovered_count} "
             f"duplicates={result.duplicate_count} "
+            f"skipped_terminal={result.skipped_terminal_count} "
             f"processed={result.processed_count} "
             f"ready={result.ready_count} "
             f"failed={result.failed_count} "
@@ -192,6 +211,7 @@ def main() -> None:
             period_start=args.period_start,
             period_end=args.period_end,
             page_size=args.page_size,
+            resume_run_id=args.resume,
             max_pages=args.max_pages,
             max_products=args.max_products,
             profile_dir=args.profile_dir,

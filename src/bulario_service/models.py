@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -15,6 +15,18 @@ class IngestionRun(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    mode: Mapped[str | None] = mapped_column(String(32))
+    period_start: Mapped[str | None] = mapped_column(String(64))
+    period_end: Mapped[str | None] = mapped_column(String(64))
+    page_size: Mapped[int | None] = mapped_column(Integer)
+    last_completed_page: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default="0",
+    )
+    last_checkpoint_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
