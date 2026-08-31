@@ -7,9 +7,9 @@ services:
     environment:
       APP_ENV: local
       DATABASE_URL: ${BULARIO_DOCKER_DATABASE_URL:-postgresql+psycopg://intelireg:intelireg_local@db:5432/intelireg}
-      BULARIO_STORAGE_ROOT: /data/bulas
+      BULARIO_STORAGE_ROOT: /data
     volumes:
-      - ${BULAS_ARCHIVE_HOST_PATH:-../intelireg-data/bulas}:/data/bulas
+      - ${BULAS_ARCHIVE_HOST_PATH:-../intelireg-data}:/data
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

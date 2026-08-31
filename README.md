@@ -822,19 +822,19 @@ Para desenvolvimento local com os repositórios em `~/Projetos`, a convenção r
 No `bulario-service`:
 
 ```env
-BULARIO_STORAGE_ROOT=../intelireg-data/bulas
+BULARIO_STORAGE_ROOT=../intelireg-data
 ```
 
 Quando o produtor roda via Docker Compose, o host path é informado separadamente:
 
 ```env
-BULAS_ARCHIVE_HOST_PATH=../intelireg-data/bulas
+BULAS_ARCHIVE_HOST_PATH=../intelireg-data
 ```
 
-e montado no container em `/data/bulas`, com:
+e montado no container em `/data`, com:
 
 ```text
-BULARIO_STORAGE_ROOT=/data/bulas
+BULARIO_STORAGE_ROOT=/data
 ```
 
 Isso mantém duas camadas distintas:
@@ -846,6 +846,22 @@ storage_key
 BULARIO_STORAGE_ROOT
 = detalhe físico de deployment
 ```
+
+Com essa convenção, uma storage key lógica como:
+
+```text
+bulas/143989/35481769/patient.pdf
+```
+
+resolve fisicamente para:
+
+```text
+host:      ../intelireg-data/bulas/143989/35481769/patient.pdf
+container: /data/bulas/143989/35481769/patient.pdf
+```
+
+A raiz física não inclui o segmento lógico `bulas`; isso evita caminhos
+redundantes como `intelireg-data/bulas/bulas/...` sem alterar o contrato.
 
 O Portal receberá, em patch próprio, o mesmo acervo físico como **read-only**, sem precisar conhecer `BULARIO_STORAGE_ROOT`.
 

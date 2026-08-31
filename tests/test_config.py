@@ -164,13 +164,13 @@ def test_load_settings_reads_storage_root(
 ) -> None:
     monkeypatch.setenv(
         "BULARIO_STORAGE_ROOT",
-        "../intelireg-data/bulas",
+        "../intelireg-data",
     )
 
     settings = load_settings(env_file=tmp_path / ".env")
 
     assert settings.storage_root == Path(
-        "../intelireg-data/bulas"
+        "../intelireg-data"
     )
 
 
