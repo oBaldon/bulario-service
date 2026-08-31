@@ -1032,6 +1032,101 @@ O resume:
 
 Retry de itens `failed` ainda não pertence a esta etapa. A política de retry e classificação avançada de falhas será introduzida posteriormente na Sprint 02.
 
+## Sprint 02 - Etapa 26: full load controlado
+
+A interface operacional oficial passa a expor o primeiro comando de sincronização:
+
+```bash
+python -m bulario_service.sync full
+```
+
+O modo `full` reutiliza o mesmo coordinator, checkpoint e mecanismo de resume já validados, mas persiste `ingestion_runs.mode = full`. Runs `full` só podem ser retomados pelo mesmo modo.
+
+### Guardrails operacionais
+
+Para evitar uma carga ampla acidentalmente ilimitada, o comando `full` usa defaults conservadores por invocação:
+
+```text
+max_pages=10
+max_products=20
+```
+
+Esses limites não definem o tamanho total da carga. Quando ainda houver trabalho, o run fica `paused` e pode ser retomado pelo mesmo `run_id`.
+
+O objetivo é permitir uma carga grande em blocos controlados:
+
+```text
+full run
+  -> bloco 1 -> checkpoint -> paused
+  -> resume  -> bloco 2 -> checkpoint -> paused
+  -> resume  -> bloco 3 -> ... -> completed
+```
+
+### Novo full run
+
+Exemplo controlado:
+
+```bash
+uv run python -m bulario_service.sync full \
+  --period-start 2026-01-01T00:00:00.000Z \
+  --period-end 2026-08-29T23:59:59.999Z \
+  --page-size 10 \
+  --max-pages 5 \
+  --max-products 20 \
+  --headed
+```
+
+A saída resume:
+
+```text
+run_id
+run_status
+resumed
+start_page
+last_completed_page
+pages_fetched
+source_total_elements
+discovered
+duplicates
+skipped_terminal
+processed
+ready
+failed
+duration_seconds
+stopped_by_page_limit
+stopped_by_product_limit
+```
+
+`source_total_elements` é o total informado pela fonte na página consultada e serve como referência operacional da dimensão da janela. Não deve ser usado como garantia permanente de cardinalidade da fonte.
+
+`duration_seconds` mede somente a invocação corrente, e não a soma histórica de todos os resumes do run.
+
+### Resume do full load
+
+```bash
+uv run python -m bulario_service.sync full \
+  --resume RUN_ID \
+  --max-pages 5 \
+  --max-products 20 \
+  --headed
+```
+
+A janela e o `page_size` originais são reutilizados. O mesmo `run_id` avança até `completed` ou volta a `paused` quando um guardrail é atingido.
+
+### Critério desta etapa
+
+A Etapa 26 considera o full load operacionalmente comprovado quando uma janela substancial puder ser percorrida em vários blocos do mesmo run, com:
+
+- checkpoint crescente;
+- resume sem nova janela;
+- `unchanged` para versões já conhecidas;
+- `inserted` somente para versões novas;
+- ausência de duplicação;
+- métricas de volume e duração por invocação;
+- eventual conclusão do run ou pausa controlada previsível.
+
+Incremental, retry avançado, reconciliation, lock e scheduler permanecem fora desta etapa.
+
 ## Banco compartilhado com o InteliReg
 
 Nesta fase, produtor e Portal utilizam a mesma instância e o mesmo database PostgreSQL. Essa decisão permite que o produtor publique no contrato já consumido pelo Portal sem criar sincronização entre bancos independentes.

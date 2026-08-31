@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import time
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -26,6 +27,8 @@ from bulario_service.publication_publisher import publish_candidate
 
 
 BATCH_MODE = "batch"
+FULL_MODE = "full"
+_ALLOWED_MODES = {BATCH_MODE, FULL_MODE}
 PRODUCT_SOURCE_PREFIX = "anvisa-product:"
 
 
@@ -61,6 +64,8 @@ class BatchIngestionResult:
     failed_count: int
     stopped_by_page_limit: bool
     stopped_by_product_limit: bool
+    source_total_elements: int | None
+    invocation_duration_seconds: float
     items: tuple[BatchItemResult, ...]
 
 
@@ -77,6 +82,7 @@ def run_batch_ingestion(
     max_pages: int | None = 1,
     max_products: int | None = None,
     resume_run_id: int | None = None,
+    run_mode: str = BATCH_MODE,
     publish: PublishFunction = publish_candidate,
 ) -> BatchIngestionResult:
     """
@@ -92,6 +98,8 @@ def run_batch_ingestion(
         max_pages=max_pages,
         max_products=max_products,
     )
+    _validate_run_mode(run_mode)
+    invocation_started = time.monotonic()
 
     if resume_run_id is None:
         resolved_page_size = page_size or 10
@@ -101,7 +109,7 @@ def run_batch_ingestion(
             )
         run = start_ingestion_run(
             session,
-            mode=BATCH_MODE,
+            mode=run_mode,
             period_start=period_start,
             period_end=period_end,
             page_size=resolved_page_size,
@@ -113,7 +121,11 @@ def run_batch_ingestion(
         start_page = 1
         resumed = False
     else:
-        run = _load_resumable_run(session, resume_run_id)
+        run = _load_resumable_run(
+            session,
+            resume_run_id,
+            expected_mode=run_mode,
+        )
         (
             resolved_period_start,
             resolved_period_end,
@@ -143,6 +155,7 @@ def run_batch_ingestion(
     stopped_by_product_limit = False
     page = start_page
     last_discovery_was_last = False
+    source_total_elements: int | None = None
 
     try:
         while True:
@@ -157,6 +170,7 @@ def run_batch_ingestion(
                 period_end=resolved_period_end,
             )
             pages_fetched += 1
+            source_total_elements = discovery.total_elements
             last_discovery_was_last = discovery.last
             page_fully_processed = True
 
@@ -277,6 +291,11 @@ def run_batch_ingestion(
         failed_count=failed_count,
         stopped_by_page_limit=stopped_by_page_limit,
         stopped_by_product_limit=stopped_by_product_limit,
+        source_total_elements=source_total_elements,
+        invocation_duration_seconds=round(
+            time.monotonic() - invocation_started,
+            3,
+        ),
         items=tuple(results),
     )
 
@@ -321,6 +340,14 @@ def _process_product(
         )
 
 
+def _validate_run_mode(run_mode: str) -> None:
+    if run_mode not in _ALLOWED_MODES:
+        raise ValueError(
+            "run_mode must be one of: "
+            + ", ".join(sorted(_ALLOWED_MODES))
+        )
+
+
 def _validate_limits(
     *,
     page_size: int | None,
@@ -340,6 +367,8 @@ def _validate_limits(
 def _load_resumable_run(
     session: Session,
     run_id: int,
+    *,
+    expected_mode: str,
 ) -> IngestionRun:
     run = session.get(IngestionRun, run_id)
     if run is None:
@@ -351,10 +380,11 @@ def _load_resumable_run(
             "ingestion run is not resumable "
             f"run_id={run_id} status={run.status}"
         )
-    if run.mode != BATCH_MODE:
+    if run.mode != expected_mode:
         raise BatchIngestionError(
-            "ingestion run mode is not compatible with batch resume "
-            f"run_id={run_id} mode={run.mode}"
+            "ingestion run mode is not compatible with requested resume "
+            f"run_id={run_id} persisted_mode={run.mode} "
+            f"requested_mode={expected_mode}"
         )
     return run
 

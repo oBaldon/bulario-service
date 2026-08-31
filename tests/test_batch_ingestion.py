@@ -544,3 +544,101 @@ def test_invalid_limits_are_rejected_before_run_creation(
         )
 
     assert session.runs == {}
+
+
+
+def test_full_mode_is_persisted_and_resumed_only_as_full(monkeypatch) -> None:
+    session = FakeSession()
+    install_batch_fakes(monkeypatch, session)
+    connector = FakeConnector([
+        [product(10)],
+        [product(20)],
+    ])
+
+    first = run_batch_ingestion(
+        session,
+        connector=connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start="2026-01-01T00:00:00.000Z",
+        period_end="2026-08-31T23:59:59.999Z",
+        page_size=1,
+        max_pages=1,
+        run_mode="full",
+    )
+
+    assert first.run_status == "paused"
+    assert session.runs[first.run_id].mode == "full"
+
+    resumed = run_batch_ingestion(
+        session,
+        connector=connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start=None,
+        period_end=None,
+        page_size=None,
+        max_pages=None,
+        resume_run_id=first.run_id,
+        run_mode="full",
+    )
+
+    assert resumed.run_id == first.run_id
+    assert resumed.run_status == "completed"
+    assert resumed.start_page == 2
+
+
+def test_full_run_cannot_be_resumed_as_batch(monkeypatch) -> None:
+    session = FakeSession()
+    install_batch_fakes(monkeypatch, session)
+    connector = FakeConnector([
+        [product(10)],
+        [product(20)],
+    ])
+
+    first = run_batch_ingestion(
+        session,
+        connector=connector,
+        downloader=SimpleNamespace(),
+        storage=SimpleNamespace(),
+        extractor=SimpleNamespace(),
+        period_start="2026-01-01T00:00:00.000Z",
+        period_end="2026-08-31T23:59:59.999Z",
+        page_size=1,
+        max_pages=1,
+        run_mode="full",
+    )
+
+    with pytest.raises(BatchIngestionError, match="requested resume"):
+        run_batch_ingestion(
+            session,
+            connector=connector,
+            downloader=SimpleNamespace(),
+            storage=SimpleNamespace(),
+            extractor=SimpleNamespace(),
+            period_start=None,
+            period_end=None,
+            resume_run_id=first.run_id,
+            run_mode="batch",
+        )
+
+
+def test_invalid_run_mode_is_rejected_before_run_creation(monkeypatch) -> None:
+    session = FakeSession()
+    install_batch_fakes(monkeypatch, session)
+
+    with pytest.raises(ValueError, match="run_mode"):
+        run_batch_ingestion(
+            session,
+            connector=FakeConnector([[]]),
+            downloader=SimpleNamespace(),
+            storage=SimpleNamespace(),
+            extractor=SimpleNamespace(),
+            period_start="2026-01-01T00:00:00.000Z",
+            period_end="2026-08-31T23:59:59.999Z",
+            run_mode="unknown",
+        )
+
+    assert session.runs == {}
