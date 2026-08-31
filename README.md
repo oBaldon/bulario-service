@@ -671,6 +671,61 @@ Uma reexecução idêntica deve produzir `publish_action=unchanged`, mantendo no
 
 Carga completa e incremental em volume ainda não são iniciadas por este comando.
 
+## Sprint 02 - Batch Ingestion Coordinator
+
+A Etapa 23 introduz o primeiro coordenador multi-produto da Sprint 02. O objetivo desta etapa é estabelecer a fronteira de um único `ingestion_run` contendo múltiplos produtos, ainda limitado à primeira página de discovery.
+
+O fluxo desta etapa é:
+
+```text
+ingestion_run
+  -> discovery page 1
+  -> produto A -> pipeline existente -> ready
+  -> produto B -> pipeline existente -> ready|failed
+  -> produto C -> pipeline existente -> ready
+  -> run completed|failed
+```
+
+Cada produto reutiliza o mesmo núcleo de processamento validado na Sprint 01. Uma falha de um produto é revertida e persistida no item correspondente sem desfazer produtos já concluídos; o coordinator continua com os demais produtos da página.
+
+Nesta etapa:
+
+- `batch item = produto`;
+- apenas a primeira página é processada;
+- ainda não existe checkpoint/resume;
+- ainda não existe modo full/incremental/reconcile;
+- ainda não existe scheduler;
+- ainda não existe retry automático;
+- o contrato `BULA_CONTRACT_V1` não é alterado.
+
+O status final do run permanece simples nesta etapa:
+
+```text
+todos os itens prontos -> completed
+um ou mais itens falhos -> failed
+```
+
+Os resultados individuais continuam preservados. Portanto, um run `failed` pode conter itens `ready` já concluídos e publicados corretamente.
+
+Smoke real multi-produto:
+
+```bash
+uv run python -m bulario_service.smoke_batch_ingestion \
+  --period-start 2026-08-01T00:00:00.000Z \
+  --period-end 2026-08-31T23:59:59.999Z \
+  --page-size 2 \
+  --headed
+```
+
+Em uma execução integralmente bem-sucedida, a saída termina com:
+
+```text
+Batch ingestion: run_id=... run_status=completed discovered=2 processed=2 ready=2 failed=0
+batch_ingestion_ready=true
+```
+
+A paginação multi-page será adicionada na Etapa 24. Este smoke existe para validar especificamente a nova fronteira multi-produto antes de avançar para checkpoint e carga ampla.
+
 ## Hardening de conflitos e rollback
 
 Após a validação E2E, o serviço possui um smoke de hardening que usa um documento operacional vigente já publicado para comprovar as barreiras de imutabilidade e idempotência sem depender de nova chamada à ANVISA.

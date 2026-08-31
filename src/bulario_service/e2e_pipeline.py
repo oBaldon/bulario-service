@@ -24,6 +24,7 @@ from bulario_service.ingestion import (
     start_ingestion_run,
     transition_ingestion_item,
 )
+from bulario_service.models import IngestionRun
 from bulario_service.operational_persistence import (
     compute_source_fingerprint,
     persist_operational_version,
@@ -53,6 +54,15 @@ class E2EPipelineResult:
     public_row_id: int
 
 
+@dataclass(frozen=True)
+class ProcessedProductResult:
+    item_id: int
+    source_product_id: int
+    source_document_id: int
+    publish_action: str
+    public_row_id: int
+
+
 PublishFunction = Callable[..., PublishResult]
 
 
@@ -71,8 +81,6 @@ def run_single_product_pipeline(
     session.commit()
     run_id = _require_id(run.id, "run")
 
-    item_id: int | None = None
-
     try:
         discovery = connector.discover_page(
             page=1,
@@ -83,21 +91,81 @@ def run_single_product_pipeline(
         if not discovery.items:
             raise E2EPipelineError("ANVISA discovery returned no products")
 
-        product = discovery.items[0]
-        _validate_discovered_product(product)
-
-        item = register_ingestion_item(
+        result = process_discovered_product(
             session,
-            run,
-            source_record_id=(
-                f"anvisa-product:{product.source_product_id}"
-            ),
-            source_url=SOURCE_URL,
-            raw_payload=product.raw_payload,
+            run=run,
+            product=discovery.items[0],
+            connector=connector,
+            downloader=downloader,
+            storage=storage,
+            extractor=extractor,
+            publish=publish,
         )
-        session.commit()
-        item_id = _require_id(item.id, "item")
 
+        persisted_run = session.get(IngestionRun, run_id)
+        if persisted_run is None:
+            raise E2EPipelineError(
+                f"cannot reload ingestion run run_id={run_id}"
+            )
+        complete_ingestion_run(session, persisted_run)
+        session.commit()
+
+        return E2EPipelineResult(
+            run_id=run_id,
+            item_id=result.item_id,
+            source_product_id=result.source_product_id,
+            source_document_id=result.source_document_id,
+            publish_action=result.publish_action,
+            public_row_id=result.public_row_id,
+        )
+
+    except Exception as exc:
+        if not isinstance(exc, E2EPipelineError):
+            session.rollback()
+        _mark_run_failed(
+            session,
+            run_id=run_id,
+            error=exc,
+        )
+        if isinstance(exc, E2EPipelineError):
+            raise
+        raise E2EPipelineError(
+            f"controlled E2E pipeline failed: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
+def process_discovered_product(
+    session: Session,
+    *,
+    run: IngestionRun,
+    product: DiscoveredProduct,
+    connector: AnvisaBularioConnector,
+    downloader: AnvisaDocumentDownloader,
+    storage: LocalDocumentStorage,
+    extractor: PdfTextExtractor,
+    publish: PublishFunction = publish_candidate,
+) -> ProcessedProductResult:
+    """Process one discovered product inside an existing ingestion run."""
+    if run.status != "running":
+        raise E2EPipelineError(
+            "product can only be processed inside a running ingestion run"
+        )
+
+    _validate_discovered_product(product)
+
+    item = register_ingestion_item(
+        session,
+        run,
+        source_record_id=(
+            f"anvisa-product:{product.source_product_id}"
+        ),
+        source_url=SOURCE_URL,
+        raw_payload=product.raw_payload,
+    )
+    session.commit()
+    item_id = _require_id(item.id, "item")
+
+    try:
         transition_ingestion_item(
             session,
             item,
@@ -195,11 +263,8 @@ def run_single_product_pipeline(
             item,
             to_status=ITEM_STATUS_READY,
         )
-        complete_ingestion_run(session, run)
-        session.commit()
 
-        return E2EPipelineResult(
-            run_id=run_id,
+        return ProcessedProductResult(
             item_id=item_id,
             source_product_id=product.source_product_id,
             source_document_id=current.source_document_id,
@@ -209,52 +274,65 @@ def run_single_product_pipeline(
 
     except Exception as exc:
         session.rollback()
-        _mark_failed(
+        _mark_item_failed(
             session,
-            run_id=run_id,
             item_id=item_id,
             error=exc,
         )
         if isinstance(exc, E2EPipelineError):
             raise
         raise E2EPipelineError(
-            f"controlled E2E pipeline failed: {type(exc).__name__}: {exc}"
+            "product pipeline failed "
+            f"source_product_id={product.source_product_id}: "
+            f"{type(exc).__name__}: {exc}"
         ) from exc
 
+def _mark_item_failed(
+    session: Session,
+    *,
+    item_id: int,
+    error: Exception,
+) -> None:
+    from bulario_service.models import IngestionItem
 
-def _mark_failed(
+    persisted_item = session.get(IngestionItem, item_id)
+    if persisted_item is None:
+        raise E2EPipelineError(
+            f"cannot recover ingestion item after failure item_id={item_id}"
+        )
+
+    if persisted_item.status not in {
+        ITEM_STATUS_READY,
+        ITEM_STATUS_FAILED,
+    }:
+        transition_ingestion_item(
+            session,
+            persisted_item,
+            to_status=ITEM_STATUS_FAILED,
+            error_code=type(error).__name__[:64],
+            error_message=str(error)[:2000],
+        )
+
+    session.commit()
+
+
+def _mark_run_failed(
     session: Session,
     *,
     run_id: int,
-    item_id: int | None,
     error: Exception,
 ) -> None:
-    from bulario_service.models import IngestionItem, IngestionRun
-
     persisted_run = session.get(IngestionRun, run_id)
     if persisted_run is None:
         raise E2EPipelineError(
             f"cannot recover ingestion run after failure run_id={run_id}"
         )
 
-    if item_id is not None:
-        persisted_item = session.get(IngestionItem, item_id)
-        if persisted_item is not None and persisted_item.status not in {
-            ITEM_STATUS_READY,
-            ITEM_STATUS_FAILED,
-        }:
-            transition_ingestion_item(
-                session,
-                persisted_item,
-                to_status=ITEM_STATUS_FAILED,
-                error_code=type(error).__name__[:64],
-                error_message=str(error)[:2000],
-            )
-
     if persisted_run.status == "running":
         fail_ingestion_run(session, persisted_run)
 
     session.commit()
+
 
 
 def _current_version(
