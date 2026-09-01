@@ -395,6 +395,22 @@ uv run python -m bulario_service.smoke_anvisa_persistence \
 
 O comando é idempotente para a mesma versão e os mesmos hashes. Ele ainda não publica em `public.bulas`.
 
+### Persistência do histórico documental
+
+No pipeline operacional por produto, o detalhe retornado pela ANVISA é tratado como um conjunto de versões documentais, e não apenas como a bula vigente.
+
+Para cada `source_document_id` retornado no detalhe/histórico:
+
+- a versão é persistida em `bulario.document_versions`;
+- PDFs de paciente e profissional são baixados quando o respectivo token existe;
+- cada PDF é armazenado em `bulas/{source_product_id}/{source_document_id}/{kind}.pdf`;
+- os artefatos físicos e seus hashes são persistidos em `bulario.document_artifacts`;
+- o texto normalizado é persistido por artefato em `bulario.document_text_artifacts`.
+
+A versão vigente continua sendo obrigatória e deve possuir os dois documentos (`patient` e `professional`) para que o produto avance até publicação. Versões históricas podem ter somente um dos documentos, conforme a disponibilidade observada na fonte.
+
+Somente a versão marcada como `current` é usada para construir o candidato publicado em `public.bulas`. O histórico permanece no schema operacional `bulario`, preservando a listagem principal do Portal como representação da versão corrente.
+
 ## Extração e normalização textual
 
 O PDF oficial permanece a evidência documental primária. O texto é um artefato derivado para etapas posteriores de comparação, indexação e RAG.

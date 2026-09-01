@@ -192,33 +192,42 @@ def process_discovered_product(
 
         detail = connector.get_product_detail(product.source_product_id)
         current = _current_version(detail.versions)
-
-        downloaded = []
-        for kind, token in (
-            ("patient", current.patient_token),
-            ("professional", current.professional_token),
-        ):
-            if not token:
-                raise E2EPipelineError(
-                    "current version is missing required document token "
-                    f"kind={kind} "
-                    f"source_document_id={current.source_document_id}"
-                )
-            downloaded.append(
-                downloader.download(
-                    source_document_id=current.source_document_id,
-                    kind=kind,
-                    token=token,
-                )
-            )
-
-        stored = tuple(
-            storage.store(
-                source_product_id=product.source_product_id,
-                document=document,
-            )
-            for document in downloaded
+        versions = _versions_for_persistence(
+            detail.versions,
+            current=current,
         )
+
+        stored_by_document_id = {}
+        for version in versions:
+            downloaded = []
+            for kind, token in (
+                ("patient", version.patient_token),
+                ("professional", version.professional_token),
+            ):
+                if not token:
+                    if version.current:
+                        raise E2EPipelineError(
+                            "current version is missing required document token "
+                            f"kind={kind} "
+                            f"source_document_id={version.source_document_id}"
+                        )
+                    continue
+
+                downloaded.append(
+                    downloader.download(
+                        source_document_id=version.source_document_id,
+                        kind=kind,
+                        token=token,
+                    )
+                )
+
+            stored_by_document_id[version.source_document_id] = tuple(
+                storage.store(
+                    source_product_id=product.source_product_id,
+                    document=document,
+                )
+                for document in downloaded
+            )
 
         transition_ingestion_item(
             session,
@@ -238,26 +247,29 @@ def process_discovered_product(
             "expedient": current.expedient,
             "publication_date": current.publication_date,
             "status": current.status,
+            "version_count": len(versions),
         }
         item.source_fingerprint = fingerprint
 
-        persist_operational_version(
-            session,
-            product=product,
-            version=current,
-            stored_documents=stored,
-            ingestion_item=item,
-        )
-
-        for stored_document in stored:
-            extracted = extractor.extract(
-                pdf_path=storage.resolve(stored_document.storage_key),
-                stored_document=stored_document,
-            )
-            persist_text_artifact(
+        for version in versions:
+            stored = stored_by_document_id[version.source_document_id]
+            persist_operational_version(
                 session,
-                extracted=extracted,
+                product=product,
+                version=version,
+                stored_documents=stored,
+                ingestion_item=item,
             )
+
+            for stored_document in stored:
+                extracted = extractor.extract(
+                    pdf_path=storage.resolve(stored_document.storage_key),
+                    stored_document=stored_document,
+                )
+                persist_text_artifact(
+                    session,
+                    extracted=extracted,
+                )
 
         transition_ingestion_item(
             session,
@@ -366,6 +378,32 @@ def _current_version(
             "product detail must contain exactly one current version"
         )
     return current[0]
+
+
+def _versions_for_persistence(
+    versions: tuple[BulaVersion, ...],
+    *,
+    current: BulaVersion,
+) -> tuple[BulaVersion, ...]:
+    if not versions:
+        raise E2EPipelineError(
+            "product detail must contain at least one document version"
+        )
+
+    seen: set[int] = set()
+    historical: list[BulaVersion] = []
+    for version in versions:
+        if version.source_document_id in seen:
+            raise E2EPipelineError(
+                "product detail contains duplicate source_document_id "
+                f"source_document_id={version.source_document_id}"
+            )
+        seen.add(version.source_document_id)
+
+        if version.source_document_id != current.source_document_id:
+            historical.append(version)
+
+    return (*historical, current)
 
 
 def _validate_discovered_product(product: DiscoveredProduct) -> None:

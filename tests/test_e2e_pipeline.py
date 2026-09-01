@@ -412,3 +412,183 @@ def test_failure_after_publication_attempt_rolls_back_and_marks_failed(
     assert session.rollbacks == 1
     assert session.runs[1].status == "failed"
     assert session.items[1].status == "failed"
+
+
+class HistoricalConnector(FakeConnector):
+    def __init__(self):
+        super().__init__()
+        self.historical_versions = (
+            BulaVersion(
+                source_document_id=30415878,
+                expedient="hist-1",
+                registration_number="123",
+                publication_date="17/05/2023",
+                status="Publicado",
+                patient_token="historical-patient-1",
+                professional_token="historical-professional-1",
+                current=False,
+                raw_payload={"idDocumento": 30415878},
+            ),
+            BulaVersion(
+                source_document_id=24619848,
+                expedient="hist-2",
+                registration_number="123",
+                publication_date="23/04/2021",
+                status="Publicado",
+                patient_token="historical-patient-2",
+                professional_token=None,
+                current=False,
+                raw_payload={"idDocumento": 24619848},
+            ),
+        )
+
+    def get_product_detail(self, source_product_id):
+        return ProductDetail(
+            source_product_id=source_product_id,
+            registration_number="123",
+            product_name="Produto",
+            versions=(
+                self.version,
+                *self.historical_versions,
+            ),
+        )
+
+
+class RecordingDownloader(FakeDownloader):
+    def __init__(self):
+        self.calls = []
+
+    def download(self, *, source_document_id, kind, token):
+        self.calls.append((source_document_id, kind, token))
+        return super().download(
+            source_document_id=source_document_id,
+            kind=kind,
+            token=token,
+        )
+
+
+def test_product_pipeline_persists_complete_history_and_publishes_current_only(
+    monkeypatch,
+) -> None:
+    session = FakeSession()
+    connector = HistoricalConnector()
+    downloader = RecordingDownloader()
+    persisted_versions = []
+    candidate_document_ids = []
+    text_document_ids = []
+
+    def operational(
+        session,
+        *,
+        product,
+        version,
+        stored_documents,
+        ingestion_item,
+    ):
+        persisted_versions.append(
+            (
+                version.source_document_id,
+                version.current,
+                tuple(document.kind for document in stored_documents),
+            )
+        )
+        return object()
+
+    def text_persistence(session, *, extracted):
+        text_document_ids.append(extracted.source_document_id)
+        return object()
+
+    def candidate(session, *, source_document_id):
+        candidate_document_ids.append(source_document_id)
+        return object()
+
+    monkeypatch.setattr(
+        "bulario_service.e2e_pipeline.persist_operational_version",
+        operational,
+    )
+    monkeypatch.setattr(
+        "bulario_service.e2e_pipeline.persist_text_artifact",
+        text_persistence,
+    )
+    monkeypatch.setattr(
+        "bulario_service.e2e_pipeline.build_publication_candidate",
+        candidate,
+    )
+
+    def publish(session, *, candidate):
+        return PublishResult(
+            action="inserted",
+            row_id=2,
+            source_record_id="anvisa:1174609:35480554",
+        )
+
+    result = run_single_product_pipeline(
+        session,
+        connector=connector,
+        downloader=downloader,
+        storage=FakeStorage(),
+        extractor=FakeExtractor(),
+        period_start="2026-08-28T00:00:00.000Z",
+        period_end="2026-08-29T00:00:00.000Z",
+        publish=publish,
+    )
+
+    assert result.source_document_id == 35480554
+    assert persisted_versions == [
+        (30415878, False, ("patient", "professional")),
+        (24619848, False, ("patient",)),
+        (35480554, True, ("patient", "professional")),
+    ]
+    assert downloader.calls == [
+        (30415878, "patient", "historical-patient-1"),
+        (30415878, "professional", "historical-professional-1"),
+        (24619848, "patient", "historical-patient-2"),
+        (35480554, "patient", "patient-token"),
+        (35480554, "professional", "professional-token"),
+    ]
+    assert text_document_ids == [
+        30415878,
+        30415878,
+        24619848,
+        35480554,
+        35480554,
+    ]
+    assert candidate_document_ids == [35480554]
+    assert session.items[result.item_id].normalized_payload["version_count"] == 3
+
+
+def test_duplicate_history_document_id_fails_before_download(
+    monkeypatch,
+) -> None:
+    session = FakeSession()
+    connector = HistoricalConnector()
+    connector.historical_versions = (
+        BulaVersion(
+            **{
+                **connector.version.__dict__,
+                "current": False,
+            }
+        ),
+    )
+    downloader = RecordingDownloader()
+    calls, publish = install_persistence_stubs(monkeypatch)
+
+    with pytest.raises(
+        E2EPipelineError,
+        match="duplicate source_document_id",
+    ):
+        run_single_product_pipeline(
+            session,
+            connector=connector,
+            downloader=downloader,
+            storage=FakeStorage(),
+            extractor=FakeExtractor(),
+            period_start="2026-08-28T00:00:00.000Z",
+            period_end="2026-08-29T00:00:00.000Z",
+            publish=publish,
+        )
+
+    assert downloader.calls == []
+    assert calls["operational"] == 0
+    assert calls["publish"] == 0
+    assert session.items[1].status == "failed"
