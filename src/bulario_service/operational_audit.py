@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -35,6 +36,17 @@ class OperationalAuditReport:
     latest_patient_storage_key: str
     latest_professional_storage_key: str
     latest_handoff_ready: bool
+    operational_products: int
+    document_versions: int
+    historical_versions: int
+    products_with_multiple_versions: int
+    invalid_current_version_products: int
+    versions_without_artifacts: int
+    audited_document_artifacts: int
+    invalid_artifact_relationships: int
+    missing_physical_artifacts: int
+    artifact_hash_mismatches: int
+    artifacts_without_text_v1: int
 
     @property
     def ok(self) -> bool:
@@ -48,6 +60,14 @@ class OperationalAuditReport:
             and self.paused_incremental_runs <= 1
             and self.validated_handoffs == self.public_anvisa_rows
             and self.latest_handoff_ready
+            and self.operational_products > 0
+            and self.document_versions >= self.operational_products
+            and self.invalid_current_version_products == 0
+            and self.versions_without_artifacts == 0
+            and self.invalid_artifact_relationships == 0
+            and self.missing_physical_artifacts == 0
+            and self.artifact_hash_mismatches == 0
+            and self.artifacts_without_text_v1 == 0
         )
 
 
@@ -133,6 +153,76 @@ def run_operational_audit(
         """,
     )
 
+    operational_products = _count(
+        session,
+        """
+        SELECT COUNT(*)
+        FROM bulario.products
+        """,
+    )
+    document_versions = _count(
+        session,
+        """
+        SELECT COUNT(*)
+        FROM bulario.document_versions
+        """,
+    )
+    historical_versions = _count(
+        session,
+        """
+        SELECT COUNT(*)
+        FROM bulario.document_versions
+        WHERE is_current IS FALSE
+        """,
+    )
+    products_with_multiple_versions = _count(
+        session,
+        """
+        SELECT COUNT(*)
+        FROM (
+            SELECT product_id
+            FROM bulario.document_versions
+            GROUP BY product_id
+            HAVING COUNT(*) > 1
+        ) versioned_products
+        """,
+    )
+    invalid_current_version_products = _count(
+        session,
+        """
+        SELECT COUNT(*)
+        FROM (
+            SELECT
+                p.id
+            FROM bulario.products p
+            LEFT JOIN bulario.document_versions dv
+              ON dv.product_id = p.id
+            GROUP BY p.id
+            HAVING COUNT(dv.id) = 0
+                OR COUNT(*) FILTER (WHERE dv.is_current) <> 1
+        ) invalid_current
+        """,
+    )
+    versions_without_artifacts = _count(
+        session,
+        """
+        SELECT COUNT(*)
+        FROM (
+            SELECT dv.id
+            FROM bulario.document_versions dv
+            LEFT JOIN bulario.document_artifacts da
+              ON da.document_version_id = dv.id
+            GROUP BY dv.id
+            HAVING COUNT(da.id) = 0
+        ) versions_without_artifacts
+        """,
+    )
+
+    artifact_audit = _audit_document_artifacts(
+        session,
+        storage_root=storage_root,
+    )
+
     handoffs = validate_all_ready_handoffs(
         session,
         storage_root=storage_root,
@@ -153,6 +243,17 @@ def run_operational_audit(
         latest_patient_storage_key=handoff.patient_storage_key,
         latest_professional_storage_key=handoff.professional_storage_key,
         latest_handoff_ready=True,
+        operational_products=operational_products,
+        document_versions=document_versions,
+        historical_versions=historical_versions,
+        products_with_multiple_versions=products_with_multiple_versions,
+        invalid_current_version_products=invalid_current_version_products,
+        versions_without_artifacts=versions_without_artifacts,
+        audited_document_artifacts=artifact_audit.audited_document_artifacts,
+        invalid_artifact_relationships=artifact_audit.invalid_artifact_relationships,
+        missing_physical_artifacts=artifact_audit.missing_physical_artifacts,
+        artifact_hash_mismatches=artifact_audit.artifact_hash_mismatches,
+        artifacts_without_text_v1=artifact_audit.artifacts_without_text_v1,
     )
 
     if not report.ok:
@@ -208,6 +309,131 @@ def _count(session: Session, sql: str) -> int:
     return int(value)
 
 
+@dataclass(frozen=True)
+class DocumentArtifactAudit:
+    audited_document_artifacts: int
+    invalid_artifact_relationships: int
+    missing_physical_artifacts: int
+    artifact_hash_mismatches: int
+    artifacts_without_text_v1: int
+
+
+def _audit_document_artifacts(
+    session: Session,
+    *,
+    storage_root: Path,
+) -> DocumentArtifactAudit:
+    rows = session.execute(
+        text(
+            """
+            SELECT
+                p.source_product_id,
+                dv.source_document_id,
+                da.kind,
+                da.storage_key,
+                da.sha256,
+                da.size_bytes,
+                EXISTS (
+                    SELECT 1
+                    FROM bulario.document_text_artifacts dta
+                    WHERE dta.document_artifact_id = da.id
+                      AND dta.normalization_version = 'v1'
+                ) AS has_text_v1
+            FROM bulario.document_artifacts da
+            JOIN bulario.document_versions dv
+              ON dv.id = da.document_version_id
+            JOIN bulario.products p
+              ON p.id = dv.product_id
+            ORDER BY
+                p.source_product_id,
+                dv.source_document_id,
+                da.kind
+            """
+        )
+    ).mappings().all()
+
+    root = storage_root.resolve()
+    invalid_relationships = 0
+    missing_files = 0
+    hash_mismatches = 0
+    missing_text = 0
+
+    for row in rows:
+        kind = str(row["kind"])
+        storage_key = str(row["storage_key"])
+        expected_key = (
+            f"bulas/{int(row['source_product_id'])}/"
+            f"{int(row['source_document_id'])}/{kind}.pdf"
+        )
+
+        if (
+            kind not in {"patient", "professional"}
+            or storage_key != expected_key
+            or not _safe_pdf_storage_key(storage_key)
+        ):
+            invalid_relationships += 1
+            continue
+
+        if not bool(row["has_text_v1"]):
+            missing_text += 1
+
+        file_path = _resolve_storage_key(
+            root=root,
+            storage_key=storage_key,
+        )
+        if file_path is None or not file_path.is_file():
+            missing_files += 1
+            continue
+
+        digest, size = _hash_file(file_path)
+        if (
+            digest != str(row["sha256"])
+            or size != int(row["size_bytes"])
+        ):
+            hash_mismatches += 1
+
+    return DocumentArtifactAudit(
+        audited_document_artifacts=len(rows),
+        invalid_artifact_relationships=invalid_relationships,
+        missing_physical_artifacts=missing_files,
+        artifact_hash_mismatches=hash_mismatches,
+        artifacts_without_text_v1=missing_text,
+    )
+
+
+def _safe_pdf_storage_key(storage_key: str) -> bool:
+    relative = PurePosixPath(storage_key)
+    return (
+        not relative.is_absolute()
+        and ".." not in relative.parts
+        and relative.suffix.lower() == ".pdf"
+    )
+
+
+def _resolve_storage_key(
+    *,
+    root: Path,
+    storage_key: str,
+) -> Path | None:
+    relative = PurePosixPath(storage_key)
+    candidate = (root / Path(*relative.parts)).resolve()
+    try:
+        candidate.relative_to(root)
+    except ValueError:
+        return None
+    return candidate
+
+
+def _hash_file(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+            size += len(chunk)
+    return digest.hexdigest(), size
+
+
 def _failure_summary(report: OperationalAuditReport) -> str:
     failures: list[str] = []
     if report.public_anvisa_rows < 1:
@@ -241,6 +467,40 @@ def _failure_summary(report: OperationalAuditReport) -> str:
         )
     if not report.latest_handoff_ready:
         failures.append("latest_handoff_ready=false")
+    if report.operational_products < 1:
+        failures.append("no operational products")
+    if report.document_versions < report.operational_products:
+        failures.append(
+            "document_versions="
+            f"{report.document_versions}/{report.operational_products}"
+        )
+    if report.invalid_current_version_products:
+        failures.append(
+            "invalid_current_version_products="
+            f"{report.invalid_current_version_products}"
+        )
+    if report.versions_without_artifacts:
+        failures.append(
+            f"versions_without_artifacts={report.versions_without_artifacts}"
+        )
+    if report.invalid_artifact_relationships:
+        failures.append(
+            "invalid_artifact_relationships="
+            f"{report.invalid_artifact_relationships}"
+        )
+    if report.missing_physical_artifacts:
+        failures.append(
+            "missing_physical_artifacts="
+            f"{report.missing_physical_artifacts}"
+        )
+    if report.artifact_hash_mismatches:
+        failures.append(
+            f"artifact_hash_mismatches={report.artifact_hash_mismatches}"
+        )
+    if report.artifacts_without_text_v1:
+        failures.append(
+            f"artifacts_without_text_v1={report.artifacts_without_text_v1}"
+        )
     return "operational audit failed: " + ", ".join(failures)
 
 

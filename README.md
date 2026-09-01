@@ -1880,6 +1880,28 @@ sprint02_operational_audit_ready=true
 
 O comando retorna exit code `2` quando alguma invariável falha.
 
+### Incremento 35 - Auditoria do histórico documental
+
+A mesma auditoria também cobre o histórico operacional persistido no schema `bulario`.
+
+Além das invariantes da publicação corrente, ela valida:
+
+```text
+quantidade de produtos e versões operacionais
+quantidade de versões históricas
+produtos com múltiplas versões
+exatamente uma versão current por produto
+nenhuma document_version sem artifact
+storage_key coerente com produto/versão/tipo
+tipo de artifact restrito a patient/professional
+arquivo físico existente
+size_bytes consistente
+SHA-256 físico = document_artifacts.sha256
+texto normalizado v1 presente para cada PDF
+```
+
+As métricas correspondentes são incluídas no JSON de `operational_audit`. A verificação continua estritamente read-only: não corrige, remove ou recria registros/arquivos automaticamente.
+
 A matriz consolidada de fechamento está em:
 
 ```text
