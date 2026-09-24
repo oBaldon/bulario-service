@@ -380,7 +380,8 @@ def test_detail_trace_identifies_history_page() -> None:
 
 
 
-def test_http_429_is_transient_and_retried() -> None:
+def test_http_429_is_transient_and_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bulario_service.anvisa.time.sleep", lambda _: None)
     payload = load_fixture("anvisa_bulario_discovery_page.json")
     calls = 0
 
@@ -409,7 +410,8 @@ def test_http_429_is_transient_and_retried() -> None:
     assert calls == 3
 
 
-def test_exhausted_http_429_is_transient_error() -> None:
+def test_exhausted_http_429_is_transient_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("bulario_service.anvisa.time.sleep", lambda _: None)
     connector = AnvisaBularioConnector(
         client=httpx.Client(
             transport=httpx.MockTransport(
@@ -429,3 +431,118 @@ def test_exhausted_http_429_is_transient_error() -> None:
             period_start="2026-08-01",
             period_end="2026-08-31",
         )
+
+
+def test_http_429_respects_retry_after_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("bulario_service.anvisa.time.sleep", sleeps.append)
+    payload = load_fixture("anvisa_bulario_discovery_page.json")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "75"})
+        return httpx.Response(200, json=payload)
+
+    connector = AnvisaBularioConnector(
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler),
+            base_url="https://consultas.anvisa.gov.br",
+        ),
+        retry_backoff_seconds=(0, 0),
+    )
+    connector.discover_page(
+        page=1, period_start="2026-08-01", period_end="2026-08-31"
+    )
+    assert calls == 2
+    assert sleeps == [75.0]
+
+
+def test_http_429_without_retry_after_uses_conservative_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("bulario_service.anvisa.time.sleep", sleeps.append)
+    payload = load_fixture("anvisa_bulario_discovery_page.json")
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return httpx.Response(429)
+        return httpx.Response(200, json=payload)
+
+    connector = AnvisaBularioConnector(
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler),
+            base_url="https://consultas.anvisa.gov.br",
+        ),
+        retry_backoff_seconds=(0, 0),
+    )
+    connector.discover_page(
+        page=1, period_start="2026-08-01", period_end="2026-08-31"
+    )
+    assert calls == 3
+    assert sleeps == [60.0, 120.0]
+
+
+def test_http_429_long_retry_after_pauses_without_early_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("bulario_service.anvisa.time.sleep", sleeps.append)
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429, headers={"Retry-After": "7200"})
+
+    connector = AnvisaBularioConnector(
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler),
+            base_url="https://consultas.anvisa.gov.br",
+        ),
+    )
+    with pytest.raises(AnvisaTransientSourceError, match="HTTP 429"):
+        connector.discover_page(
+            page=1, period_start="2026-08-01", period_end="2026-08-31"
+        )
+    assert calls == 1
+    assert sleeps == []
+
+
+def test_http_429_retry_after_http_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    sleeps: list[float] = []
+    monkeypatch.setattr("bulario_service.anvisa.time.sleep", sleeps.append)
+    payload = load_fixture("anvisa_bulario_discovery_page.json")
+    retry_at = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=90))
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": retry_at})
+        return httpx.Response(200, json=payload)
+
+    connector = AnvisaBularioConnector(
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler),
+            base_url="https://consultas.anvisa.gov.br",
+        ),
+    )
+    connector.discover_page(
+        page=1, period_start="2026-08-01", period_end="2026-08-31"
+    )
+    assert calls == 2
+    assert len(sleeps) == 1
+    assert 85 <= sleeps[0] <= 90

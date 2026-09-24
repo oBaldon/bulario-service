@@ -1,4 +1,7 @@
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+import math
 import time
 from typing import Any, Callable
 
@@ -8,6 +11,8 @@ import httpx
 DEFAULT_BASE_URL = "https://consultas.anvisa.gov.br"
 DEFAULT_DISCOVERY_PAGE_SIZE = 100
 DEFAULT_DETAIL_PAGE_SIZE = 10
+MAX_RETRY_AFTER_SECONDS = 3600.0
+RATE_LIMIT_BACKOFF_SECONDS = 60.0
 
 _REQUEST_HEADERS = {
     "Accept": "application/json, text/plain, */*",
@@ -373,8 +378,19 @@ class AnvisaBularioConnector:
                     outcome="transient_http_error",
                 )
                 if attempt < self._max_attempts:
-                    self._sleep_before_retry(attempt)
-                    continue
+                    if status == 429:
+                        wait = _rate_limit_wait_seconds(
+                            response.headers.get("Retry-After"),
+                            attempt=attempt,
+                        )
+                        if wait is not None:
+                            time.sleep(wait)
+                            continue
+                        # The source requests a delay longer than our bounded
+                        # retry window. Pause the run rather than retry early.
+                    else:
+                        self._sleep_before_retry(attempt)
+                        continue
 
             self._emit_trace(
                 path=path,
@@ -494,6 +510,29 @@ class AnvisaBularioConnector:
             current=document_id == current_document_id,
             raw_payload=raw_version,
         )
+
+
+def _rate_limit_wait_seconds(value: str | None, *, attempt: int) -> float | None:
+    """Return a bounded wait for HTTP 429; None means do not retry yet."""
+    fallback = min(RATE_LIMIT_BACKOFF_SECONDS * attempt, MAX_RETRY_AFTER_SECONDS)
+    if value is None:
+        return fallback
+
+    try:
+        seconds = float(value.strip())
+        if math.isfinite(seconds) and seconds >= 0:
+            return seconds if seconds <= MAX_RETRY_AFTER_SECONDS else None
+    except ValueError:
+        pass
+
+    try:
+        retry_at = parsedate_to_datetime(value)
+        if retry_at.tzinfo is None:
+            return fallback
+        seconds = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+        return seconds if seconds <= MAX_RETRY_AFTER_SECONDS else None
+    except (TypeError, ValueError, OverflowError):
+        return fallback
 
 
 def _required_int(value: Any, *, field: str) -> int:
